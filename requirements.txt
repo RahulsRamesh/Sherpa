@@ -1,0 +1,9 @@
+anthropic
+python-dotenv
+pynput
+pyobjc-framework-Quartz
+pillow
+sounddevice
+numpy
+soundfile
+requests
