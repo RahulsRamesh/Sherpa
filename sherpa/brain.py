@@ -69,6 +69,11 @@ def get_answer(messages: list) -> str:
     parts = [block.text for block in message.content if block.type == "text"]
     text = " ".join(parts).strip()
 
+    # An empty answer must never reach session history: the API rejects empty
+    # text blocks, so it would break every later question in the session.
+    if not text:
+        raise RuntimeError(f"Claude returned no text (stop_reason={message.stop_reason})")
+
     if message.stop_reason == "max_tokens":
         text = _trim_to_last_sentence(text)
     return text
