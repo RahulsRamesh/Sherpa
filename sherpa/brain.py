@@ -2,6 +2,7 @@
 
 import base64
 import io
+import re
 from pathlib import Path
 
 from anthropic import Anthropic
@@ -11,6 +12,11 @@ from .config import ANTHROPIC_API_KEY
 
 MODEL = "claude-sonnet-5"
 MAX_DIMENSION = 1568  # Anthropic's recommended cap for image longest side
+MAX_TOKENS = 1500  # generous headroom; the prompt keeps answers short anyway
+
+# End of a sentence: terminal punctuation, optional closing quote/paren, then
+# whitespace or end of string.
+_SENTENCE_END = re.compile(r"[.!?][\"')\]]*(?=\s|$)")
 
 SYSTEM_PROMPT = (
     "You are Sherpa, a screen-aware assistant having an ongoing spoken "
@@ -27,8 +33,9 @@ SYSTEM_PROMPT = (
     "Your reply will be read aloud by text-to-speech, so:\n"
     "- Write in plain spoken sentences. No markdown, no bullet points, no "
     "headers, no code blocks.\n"
-    "- Be concise — a few sentences, not a lecture, unless the question "
-    "genuinely needs more.\n"
+    "- Keep it short: usually two to four sentences. Long answers are tiring "
+    "to listen to. If the question needs more, give the key point first and "
+    "offer to go into more detail rather than covering everything at once.\n"
     "- Refer to things naturally (\"the button in the top right\", \"that "
     "error message\") rather than saying 'in the screenshot' or 'in the "
     "image'.\n"
@@ -54,10 +61,23 @@ def get_answer(messages: list) -> str:
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=500,
+        max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
         messages=messages,
     )
 
     parts = [block.text for block in message.content if block.type == "text"]
-    return " ".join(parts).strip()
+    text = " ".join(parts).strip()
+
+    if message.stop_reason == "max_tokens":
+        text = _trim_to_last_sentence(text)
+    return text
+
+
+def _trim_to_last_sentence(text: str) -> str:
+    """Drop a trailing partial sentence so TTS doesn't stop mid-word. If
+    there's no complete sentence at all, keep what we have."""
+    ends = list(_SENTENCE_END.finditer(text))
+    if not ends:
+        return text
+    return text[: ends[-1].end()].strip()
