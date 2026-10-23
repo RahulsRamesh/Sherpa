@@ -100,8 +100,6 @@ anywhere to start a session.
 
 ## Known limitations
 
-- Only the main display is supported for cursor-region cropping (relevant
-  if you use multiple monitors).
 - Silence detection uses a simple energy threshold calibrated against a
   short ambient-noise sample at the start of each recording — it may need
   tuning if your environment is noisy.
