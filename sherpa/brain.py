@@ -12,7 +12,14 @@ from .config import ANTHROPIC_API_KEY
 
 MODEL = "claude-sonnet-5"
 MAX_DIMENSION = 1568  # Anthropic's recommended cap for image longest side
-MAX_TOKENS = 1500  # generous headroom; the prompt keeps answers short anyway
+# Sonnet 5 thinks by default, and thinking tokens count against max_tokens.
+# At 1500, a hard question could spend the whole budget thinking and return
+# no answer text at all. The prompt keeps spoken answers short; this cap is
+# just room for thinking plus the reply.
+MAX_TOKENS = 16000
+# Low effort keeps thinking brief so spoken replies come back quickly; the
+# answers are two to four sentences and rarely need deep reasoning.
+EFFORT = "low"
 
 # End of a sentence: terminal punctuation, optional closing quote/paren, then
 # whitespace or end of string.
@@ -62,6 +69,7 @@ def get_answer(messages: list) -> str:
     message = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
+        output_config={"effort": EFFORT},
         system=SYSTEM_PROMPT,
         messages=messages,
     )
