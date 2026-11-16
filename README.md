@@ -18,23 +18,29 @@ that one" / "try that again" style questions.
 1. Double-tap Right Option → a short spoken greeting confirms the session
    has started. No screen capture or API calls happen for this step.
 2. Shift + Right Option → a short "pop" plays and Sherpa starts listening
-   (and watching your pointer) at once. Talk while you point, circle,
+   (and watching your pointer) at once; a fading trail follows your cursor. Talk while you point, circle,
    hover, open menus, or switch windows. It auto-stops after ~0.9s of
    silence, or after 20s.
 3. During that window Sherpa records:
    - **Your pointer's path**, from an always-on in-memory tracker.
-   - **Screen frames** of the display your pointer is on: one at the start,
-     plus another whenever the screen visibly changes (a dropdown opens, an
-     error appears, you switch windows), up to 3, plus a final one.
+   - **Screen frames** of the display your pointer is on, sampled ~3 times a
+     second. A frame is kept at the start and whenever the screen visibly
+     changes (a dropdown opens, an error appears, you switch windows); frames
+     that look identical to the last kept one are dropped. Up to 6 are kept,
+     and the final state is always included.
    - **Gestures**, detected locally: circling something, and hovering on
      something.
    - **Word timestamps** for what you said (Deepgram), so "this one" can be
      matched to where the pointer was at that moment.
 4. Claude receives the frames with your pointer trail drawn on them (blue =
-   earlier, red = later, numbered marks where you circled or hovered),
-   full-resolution close-ups of the circled/hovered spots and where the
-   pointer ended, and a text timeline of speech against pointer movement.
-   The answer is spoken back (ElevenLabs).
+   earlier, red = later, numbered marks where you circled or hovered) and a
+   text timeline of speech against pointer movement. The answer is spoken
+   back (ElevenLabs).
+
+While Sherpa is listening you also see your own cursor trail on screen,
+fading out about 1.5 seconds after you draw it. That overlay is for you
+only: it is excluded from Sherpa's screenshots, so Claude sees just the
+annotated path described above.
 5. Repeat step 2 for follow-ups, or triple-tap to end the session.
 
 If it doesn't hear anything within 6 seconds, or something errors out,

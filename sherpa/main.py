@@ -5,17 +5,22 @@ Shift + Right Option     -> ask a question about what your cursor is pointing at
 Triple-tap Right Option  -> end the session (purges retained files).
 """
 
+import signal
 import threading
 import time
 import traceback
 from typing import Optional
 
+from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
 from pynput import keyboard
+from Foundation import NSTimer
+from PyObjCTools import AppHelper
 
 from . import audio, debug, overlay, stt, tts
 from .config import TMP_DIR, check_config
 from .pointer import PointerTracker
 from .sampler import ScreenSampler
+from .trail import TrailOverlay
 from .session import Session
 
 TAP_WINDOW_S = 0.4
@@ -31,6 +36,7 @@ _tap_timer: Optional[threading.Timer] = None
 
 _session = Session()
 _tracker = PointerTracker()
+_trail = TrailOverlay(_tracker)
 
 
 def _speak(text: str) -> None:
@@ -81,16 +87,19 @@ def handle_question() -> None:
         # Screen frames are sampled in the background for the whole gesture
         # window; the pointer trace comes from the always-on tracker.
         sampler.start()
+        _trail.start(window_start)  # live fading cursor trail while listening
         try:
             question_audio, audio_t0 = audio.record_until_silence(on_started=audio.play_listening_cue)
         except RuntimeError as e:
             print(f"[Sherpa] {e}")
+            _trail.stop()
             sampler.discard()
             audio.play_cue("error")
             return
         debug.new_turn()
         debug.save_audio(question_audio)
         window_end = time.monotonic()
+        _trail.stop()
         sampler.stop()  # grabs one last frame in the background while we transcribe
 
         audio.play_cue("processing", wait=False)
@@ -107,7 +116,7 @@ def handle_question() -> None:
         trace = _tracker.since(window_start, window_end)
         ctx = overlay.build_context(keyframes, trace, words, window_start, window_end, audio_t0)
         gestures = [l for l in ctx.text.splitlines() if l.lstrip().startswith("[")]
-        print(f"[Sherpa] {len(ctx.frames)} frame(s), {len(ctx.closeups)} close-up(s), {len(gestures)} gesture(s).")
+        print(f"[Sherpa] {len(ctx.frames)} frame(s), {len(gestures)} gesture(s).")
         for line in gestures:
             print(f"[Sherpa]   {line.strip()}")
 
@@ -122,6 +131,7 @@ def handle_question() -> None:
         traceback.print_exc()
         audio.play_cue("error")
     finally:
+        _trail.stop()
         sampler.discard()  # removes any frame files left by an early exit
         _busy.release()
         if _session.pending_end:
@@ -191,8 +201,19 @@ def main() -> None:
         "  Triple-tap Right Option  -> end the session\n"
         "Ctrl+C to quit."
     )
-    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-        listener.join()
+    # AppKit (the trail overlay) must own the main thread, so the hotkey
+    # listener runs in the background and Cocoa's event loop runs here.
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener.start()
+    NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon
+    # Python only runs signal handlers when it gets control, which Cocoa's loop
+    # never gives back on its own: a cheap repeating timer wakes it so Ctrl+C works.
+    signal.signal(signal.SIGINT, lambda *_: AppHelper.stopEventLoop())
+    NSTimer.scheduledTimerWithTimeInterval_repeats_block_(0.25, True, lambda _t: None)
+    try:
+        AppHelper.runEventLoop()
+    finally:
+        listener.stop()
 
 
 if __name__ == "__main__":

@@ -76,6 +76,16 @@ class PointerTracker:
                 return
             self._points.append(TracePoint(t, float(x), float(y)))
 
+    def recent(self, start: float, end: float) -> list:
+        """Raw samples in [start, end], plus the one just before `start` so a
+        path entering the range is continuous. For live drawing."""
+        with self._lock:
+            pts = list(self._points)
+        i = 0
+        while i < len(pts) and pts[i].t < start:
+            i += 1
+        return [p for p in pts[max(0, i - 1):] if p.t <= end]
+
     def since(self, start: float, end: Optional[float] = None) -> list:
         """Trace for [start, end], beginning and ending with a point at the
         window edges so a stationary pointer still yields a path."""

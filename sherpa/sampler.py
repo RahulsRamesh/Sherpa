@@ -20,12 +20,13 @@ import numpy as np
 from . import capture, imgdiff
 from .config import TMP_DIR
 
-MAX_KEYFRAMES = 3
-SAMPLE_GAP_S = 0.3  # pause between captures (each capture itself takes ~0.3s)
+MAX_KEYFRAMES = 6
+SAMPLES_PER_SECOND = 3  # capture start-to-start; a capture takes ~0.3s, so this is about the ceiling
 # Keep a new frame when this fraction of the 64x64 thumbnail cells changed.
-# Above the ~0.003 noise floor measured on a static screen, below a dropdown
-# or error banner (roughly 1-4% of the screen).
-CHANGE_FRACTION = 0.01
+# Just above the ~0.003 noise floor measured on a static screen (blinking
+# cursor, clock), so identical-looking screens are dropped but any real
+# change, even a small popup, keeps a frame.
+CHANGE_FRACTION = 0.005
 
 
 @dataclass
@@ -74,8 +75,9 @@ class ScreenSampler:
     def _run(self) -> None:
         try:
             while not self._stop.is_set():
+                next_at = time.monotonic() + 1.0 / SAMPLES_PER_SECOND
                 self._grab()
-                self._stop.wait(SAMPLE_GAP_S)
+                self._stop.wait(max(0.0, next_at - time.monotonic()))
             self._grab()  # final state of the screen
         except Exception as e:  # surfaced by finish() only if no frame was ever kept
             self._error = e

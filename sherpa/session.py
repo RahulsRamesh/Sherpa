@@ -42,9 +42,6 @@ class Session:
             last_frame_b64 = brain.encode_pil(img)
             content.append({"type": "text", "text": f"{label}:"})
             content.append(_image_block(last_frame_b64))
-        for label, img in ctx.closeups:
-            content.append({"type": "text", "text": f"{label}:"})
-            content.append(_image_block(brain.encode_pil(img)))
         content.append({"type": "text", "text": f"Question: {question}"})
 
         answer = brain.get_answer(self._history_messages() + [{"role": "user", "content": content}])

@@ -1,19 +1,16 @@
 """Turn a gesture window (keyframes + pointer trace + timed words) into what
-Claude sees: trail-annotated screen frames, full-resolution close-ups of what
-was circled/hovered, and a text timeline tying speech to pointer movement.
+Claude sees: trail-annotated screen frames and a text timeline tying speech
+to pointer movement.
 
 Everything is built in memory; the keyframe files are deleted once loaded.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
 from .pointer import Gesture, TracePoint, detect_gestures
 from .sampler import Keyframe
-
-MAX_EVENT_CLOSEUPS = 2  # circles first, then the longest hovers
 
 TRAIL_START = (40, 120, 255)  # earlier = blue
 TRAIL_END = (255, 50, 50)  # later = red
@@ -27,7 +24,6 @@ EVENT_PAD = 0.3  # seconds of slack when matching spoken words to an event
 class GestureContext:
     text: str
     frames: list  # [(label, PIL.Image)] annotated keyframes, chronological
-    closeups: list  # [(label, PIL.Image)] unannotated, native resolution
 
 
 def _lerp(c0: tuple, c1: tuple, p: float) -> tuple:
@@ -109,20 +105,6 @@ def _render_frame(raw: Image.Image, rect: tuple, points: list, marks: list) -> I
     return Image.alpha_composite(raw.convert("RGBA"), layer).convert("RGB")
 
 
-def _closeup(raw: Image.Image, rect: tuple, cx: float, cy: float, bbox: Optional[tuple]) -> Image.Image:
-    """Native-resolution crop around a point, or around a circled bbox with margin."""
-    if bbox is not None:
-        w = min(max((bbox[2] - bbox[0]) * 1.5, 500), 1200)
-        h = min(max((bbox[3] - bbox[1]) * 1.5, 380), 900)
-    else:
-        w, h = 600, 450
-    w, h = min(w, rect[2]), min(h, rect[3])
-    x = max(0, min(cx - rect[0] - w / 2, rect[2] - w))
-    y = max(0, min(cy - rect[1] - h / 2, rect[3] - h))
-    s = raw.width / rect[2]
-    return raw.crop((round(x * s), round(y * s), round((x + w) * s), round((y + h) * s)))
-
-
 def _where(x: float, y: float, rect: tuple) -> str:
     fx, fy = (x - rect[0]) / rect[2], (y - rect[1]) / rect[3]
     horiz = "left" if fx < 1 / 3 else "right" if fx > 2 / 3 else "center"
@@ -150,7 +132,7 @@ def build_context(
     window_end: float,
     audio_t0: float,
 ) -> GestureContext:
-    """Assemble the annotated frames, close-ups and timeline for one question.
+    """Assemble the annotated frames and timeline for one question.
 
     Consumes (and deletes) the keyframe image files.
     """
@@ -180,7 +162,6 @@ def build_context(
     owner = {num: frame_of(g) for num, g in numbered}
 
     frames: list = []
-    raws: list = []
     lines = [
         f"Gesture window: {rel(window_end):.1f}s, {len(keyframes)} screen frame(s). On each frame the pointer's path "
         "is drawn as a trail from blue (earlier) to red (later); the green dot is where the pointer was when that "
@@ -188,13 +169,11 @@ def build_context(
         "places the user circled (boxes) or hovered on (rings). Times below are seconds since the user triggered.",
         "",
     ]
-    closeup_sources: list = []  # (priority, label, raw, rect, g)
 
     for k, kf in enumerate(keyframes):
         raw = Image.open(kf.path)
         raw.load()
         kf.path.unlink(missing_ok=True)
-        raws.append(raw)
 
         seg = [p for p in trace if bounds[k] <= p.t < bounds[k + 1]]
         if k > 0 and trace:  # continue the path from the previous interval's last point
@@ -203,6 +182,7 @@ def build_context(
                 seg.insert(0, TracePoint(bounds[k], prev[-1].x, prev[-1].y))
         marks = [(num, g) for num, g in numbered if owner[num] == k]
         frames.append((f"Frame {k + 1} of {len(keyframes)}", _render_frame(raw, kf.rect, seg, marks)))
+        raw.close()
 
         span = f"{rel(bounds[k]):.1f}s to {rel(min(bounds[k + 1], window_end)):.1f}s"
         head = f"Frame {k + 1} ({span})"
@@ -224,28 +204,8 @@ def build_context(
                 f"  [{num}] {rel(g.t0):.1f}s–{rel(g.t1):.1f}s: {verb} something at "
                 f"{_where(g.cx, g.cy, kf.rect)}" + (f' while saying "{said}".' if said else ".")
             )
-            prio = (0 if g.kind == "circle" else 1, -(g.t1 - g.t0))
-            closeup_sources.append((prio, num, raw, kf.rect, g))
         frame_said = _said(words, bounds[k], min(bounds[k + 1], window_end), audio_t0)
         if frame_said:
             lines.append(f'  Spoken during this interval: "{frame_said}"')
 
-    closeups: list = []
-    for _, num, raw, rect, g in sorted(closeup_sources, key=lambda s: s[0])[:MAX_EVENT_CLOSEUPS]:
-        label = f"Close-up of mark [{num}] ({'circled' if g.kind == 'circle' else 'hovered'} region)"
-        closeups.append((label, _closeup(raw, rect, g.cx, g.cy, g.bbox if g.kind == "circle" else None)))
-
-    # Always include where the pointer ended up: often the thing being asked about.
-    last_kf = keyframes[-1]
-    final = next((p for p in reversed(trace) if _in_rect(p.x, p.y, last_kf.rect)), None)
-    covered = any(
-        src[4].cx and abs(src[4].cx - final.x) < 150 and abs(src[4].cy - final.y) < 150
-        for src in sorted(closeup_sources, key=lambda s: s[0])[:MAX_EVENT_CLOSEUPS]
-        if final is not None and src[3] == last_kf.rect
-    )
-    if final is not None and not covered:
-        closeups.append(
-            ("Close-up of where the pointer ended", _closeup(raws[-1], last_kf.rect, final.x, final.y, None))
-        )
-
-    return GestureContext("\n".join(lines), frames, closeups)
+    return GestureContext("\n".join(lines), frames)
