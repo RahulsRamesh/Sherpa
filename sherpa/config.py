@@ -26,5 +26,8 @@ def check_config() -> None:
         )
 
 
+DEBUG = os.environ.get("SHERPA_DEBUG", "").lower() in ("1", "true", "yes")
+
 TMP_DIR = Path(__file__).parent / "_tmp"
+DEBUG_DIR = Path(__file__).parent / "_debug"
 TMP_DIR.mkdir(exist_ok=True)

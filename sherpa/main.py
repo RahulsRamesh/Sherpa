@@ -12,7 +12,7 @@ from typing import Optional
 
 from pynput import keyboard
 
-from . import audio, overlay, stt, tts
+from . import audio, debug, overlay, stt, tts
 from .config import TMP_DIR, check_config
 from .pointer import PointerTracker
 from .sampler import ScreenSampler
@@ -88,6 +88,8 @@ def handle_question() -> None:
             sampler.discard()
             audio.play_cue("error")
             return
+        debug.new_turn()
+        debug.save_audio(question_audio)
         window_end = time.monotonic()
         sampler.stop()  # grabs one last frame in the background while we transcribe
 

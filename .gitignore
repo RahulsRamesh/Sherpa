@@ -6,3 +6,4 @@ venv/
 sherpa/_tmp/
 .DS_Store
 .claude/
+sherpa/_debug/

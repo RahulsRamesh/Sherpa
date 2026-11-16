@@ -7,6 +7,7 @@ import re
 from anthropic import Anthropic
 from PIL import Image
 
+from . import debug
 from .config import ANTHROPIC_API_KEY
 
 MODEL = "claude-sonnet-5"
@@ -75,6 +76,7 @@ def encode_pil(img: Image.Image) -> str:
 def get_answer(messages: list) -> str:
     """Send a pre-built conversation (see session.py) to Claude and return
     the assistant's reply text."""
+    debug.save_request(SYSTEM_PROMPT, messages)
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
     message = client.messages.create(
@@ -95,6 +97,7 @@ def get_answer(messages: list) -> str:
 
     if message.stop_reason == "max_tokens":
         text = _trim_to_last_sentence(text)
+    debug.save_answer(text)
     return text
 
 
