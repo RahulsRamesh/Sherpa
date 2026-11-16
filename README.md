@@ -6,8 +6,10 @@ A screen-aware voice assistant, with follow-up-friendly sessions:
   greeting ("How can I help?") to confirm it's listening.
 - **Shift + Right Option** — ask a question. Captures your screen/cursor
   position, records until you go quiet, and speaks back an answer.
-- **Triple-tap Right Option** — end the session. Purges everything that
-  session retained.
+- **Single tap Right Option** — stop Sherpa talking (or thinking) without
+  asking anything new.
+- **Triple-tap Right Option** — end the session immediately, even mid-answer.
+  Purges everything that session retained.
 
 Ask as many follow-ups as you want within a session (Shift + Right Option
 each time) — Sherpa remembers the conversation and can handle "what about
@@ -42,6 +44,14 @@ fading out about 1.5 seconds after you draw it. That overlay is for you
 only: it is excluded from Sherpa's screenshots, so Claude sees just the
 annotated path described above.
 5. Repeat step 2 for follow-ups, or triple-tap to end the session.
+
+**Interrupting:** if Sherpa misunderstood you, or you've heard enough,
+Shift + Right Option while she's thinking or talking cuts her off and
+starts listening for a new question. A single tap of Right Option just
+stops her. An answer you interrupt *before it was spoken* is discarded and
+isn't remembered; one you interrupt mid-speech is kept, since you heard
+part of it. (Requests already sent to Deepgram/Claude can't be recalled, but
+their results are thrown away.)
 
 If it doesn't hear anything within 6 seconds, or something errors out,
 you'll hear a low "error" tone instead. Shift + Right Option outside of an
@@ -124,8 +134,5 @@ anywhere to start a session.
   tuning if your environment is noisy.
 - One session at a time, single global conversation — no branching or
   multiple concurrent sessions.
-- If a question is still being processed when you triple-tap, the session
-  end is queued and applied right after that question finishes, rather than
-  interrupting it.
 - No visual UI/menu bar presence yet; it's a terminal process with audio
   cues for feedback.

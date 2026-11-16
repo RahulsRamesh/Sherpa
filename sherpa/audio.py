@@ -1,6 +1,7 @@
 """Microphone recording with silence-based auto-stop, and playback."""
 
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -142,5 +143,29 @@ def record_until_silence(on_started: Optional[Callable[[], None]] = None) -> tup
     return out_path, started_at
 
 
-def play_audio_file(path: Path) -> None:
-    subprocess.run(["afplay", str(path)], check=False)
+_player_lock = threading.Lock()
+_player: Optional[subprocess.Popen] = None
+
+
+def play_audio_file(path: Path, still_wanted: Callable[[], bool] = lambda: True) -> None:
+    """Play a file and wait for it to finish, unless stop_playback() cuts it off.
+
+    `still_wanted` is checked under the same lock stop_playback() uses, so a
+    stop that lands just before playback starts can't be missed."""
+    global _player
+    with _player_lock:
+        if not still_wanted():
+            return
+        proc = subprocess.Popen(["afplay", str(path)])
+        _player = proc
+    proc.wait()
+    with _player_lock:
+        if _player is proc:
+            _player = None
+
+
+def stop_playback() -> None:
+    """Cut off whatever play_audio_file() is currently playing, if anything."""
+    with _player_lock:
+        if _player is not None and _player.poll() is None:
+            _player.terminate()

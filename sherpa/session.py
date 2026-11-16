@@ -7,6 +7,7 @@ final frame of each turn's gesture (as base64 in memory). `end()` clears it.
 """
 
 import random
+from typing import Callable
 
 from . import brain
 from .overlay import GestureContext
@@ -21,21 +22,18 @@ def _image_block(b64: str) -> dict:
 class Session:
     def __init__(self):
         self.active = False
-        self.pending_end = False
         self.turns: list[dict] = []
 
     def start(self) -> str:
         self.active = True
-        self.pending_end = False
         self.turns = []
         return random.choice(GREETINGS)
 
     def end(self) -> None:
         self.active = False
-        self.pending_end = False
         self.turns = []
 
-    def ask(self, question: str, ctx: GestureContext) -> str:
+    def ask(self, question: str, ctx: GestureContext, is_current: Callable[[], bool] = lambda: True) -> str:
         content = [{"type": "text", "text": ctx.text}]
         last_frame_b64 = ""
         for label, img in ctx.frames:
@@ -45,7 +43,10 @@ class Session:
         content.append({"type": "text", "text": f"Question: {question}"})
 
         answer = brain.get_answer(self._history_messages() + [{"role": "user", "content": content}])
-        self.turns.append({"question": question, "frame_b64": last_frame_b64, "answer": answer})
+        # An answer the user interrupted before it was spoken was never heard:
+        # keep it out of history so follow-ups don't build on it.
+        if is_current():
+            self.turns.append({"question": question, "frame_b64": last_frame_b64, "answer": answer})
         return answer
 
     def _history_messages(self) -> list:

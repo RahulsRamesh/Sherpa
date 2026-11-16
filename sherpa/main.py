@@ -2,7 +2,10 @@
 
 Double-tap Right Option  -> start a session (spoken greeting).
 Shift + Right Option     -> ask a question about what your cursor is pointing at.
-Triple-tap Right Option  -> end the session (purges retained files).
+                            If Sherpa is thinking or talking, this interrupts her
+                            and starts listening for your new question.
+Single tap Right Option  -> stop Sherpa talking / working (no new question).
+Triple-tap Right Option  -> end the session now (purges retained files).
 """
 
 import signal
@@ -27,7 +30,13 @@ TAP_WINDOW_S = 0.4
 TRIGGER_KEY = keyboard.Key.alt_r
 SHIFT_KEYS = {keyboard.Key.shift, keyboard.Key.shift_r}
 
-_busy = threading.Lock()
+# Who "owns" Sherpa right now. Every question/greeting takes a new token; work
+# belonging to an older token is superseded: it stops speaking and its results
+# are thrown away (network calls already in flight can't be cancelled, but
+# their output is discarded). Phase: idle | listening | working | speaking.
+_state_lock = threading.Lock()
+_token = 0
+_phase = "idle"
 _key_down = False
 _shift_down: set = set()
 
@@ -39,34 +48,82 @@ _tracker = PointerTracker()
 _trail = TrailOverlay(_tracker)
 
 
-def _speak(text: str) -> None:
+def _current(token: int) -> bool:
+    return token == _token
+
+
+def _set_phase(token: int, phase: str) -> bool:
+    """Move this token's work to `phase`. False if it has been superseded."""
+    global _phase
+    with _state_lock:
+        if token != _token:
+            return False
+        _phase = phase
+        return True
+
+
+def _release(token: int) -> None:
+    global _phase
+    with _state_lock:
+        if token == _token:
+            _phase = "idle"
+
+
+def _supersede(new_phase: str) -> tuple:
+    """Take ownership for new work. Returns (token, was_active); anything
+    that was working or speaking is now stale and playback is cut off."""
+    global _token, _phase
+    with _state_lock:
+        was_active = _phase in ("working", "speaking")
+        _token += 1
+        _phase = new_phase
+        token = _token
+    audio.stop_playback()
+    return token, was_active
+
+
+def handle_interrupt() -> None:
+    """Stop talking/working without starting a new question."""
+    global _token, _phase
+    with _state_lock:
+        if _phase not in ("working", "speaking"):
+            return
+        _token += 1
+        _phase = "idle"
+    audio.stop_playback()
+    print("[Sherpa] Interrupted.")
+
+
+def _speak(text: str, token: int) -> None:
     path = tts.synthesize(text)
-    audio.play_audio_file(path)
-    path.unlink(missing_ok=True)
+    try:
+        if _set_phase(token, "speaking"):
+            audio.play_audio_file(path, still_wanted=lambda: _current(token))
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def handle_start() -> None:
     if _session.active:
         print("[Sherpa] Session already active — ignoring.")
         return
-    greeting = _session.start()
-    print(f"\n[Sherpa] Session started. {greeting}")
-    _speak(greeting)
+    token, _ = _supersede("working")
+    try:
+        greeting = _session.start()
+        print(f"\n[Sherpa] Session started. {greeting}")
+        _speak(greeting, token)
+    finally:
+        _release(token)
 
 
 def handle_end() -> None:
     if not _session.active:
         return
-    if not _busy.acquire(blocking=False):
-        print("[Sherpa] Busy — will end the session once the current question finishes.")
-        _session.pending_end = True
-        return
-    try:
-        _session.end()
-        print("[Sherpa] Session ended — data purged.")
-        audio.play_cue("session_end")
-    finally:
-        _busy.release()
+    _supersede("idle")  # stops any speech and makes in-flight work discard its results
+    _trail.stop()
+    _session.end()
+    print("[Sherpa] Session ended — data purged.")
+    audio.play_cue("session_end")
 
 
 def handle_question() -> None:
@@ -75,9 +132,13 @@ def handle_question() -> None:
         audio.play_cue("error")
         return
 
-    if not _busy.acquire(blocking=False):
-        print("[Sherpa] Still working on the last question — ignoring trigger.")
-        return
+    with _state_lock:
+        if _phase == "listening":
+            print("[Sherpa] Already listening — ignoring trigger.")
+            return
+    token, interrupted = _supersede("listening")
+    if interrupted:
+        print("[Sherpa] Interrupted — listening for your new question.")
 
     sampler = ScreenSampler()
     try:
@@ -94,18 +155,24 @@ def handle_question() -> None:
             print(f"[Sherpa] {e}")
             _trail.stop()
             sampler.discard()
-            audio.play_cue("error")
+            if _current(token):
+                audio.play_cue("error")
             return
         debug.new_turn()
         debug.save_audio(question_audio)
         window_end = time.monotonic()
         _trail.stop()
         sampler.stop()  # grabs one last frame in the background while we transcribe
+        if not _set_phase(token, "working"):
+            question_audio.unlink(missing_ok=True)
+            return
 
         audio.play_cue("processing", wait=False)
         print("[Sherpa] Transcribing...")
         question, words = stt.transcribe_with_words(question_audio)
         question_audio.unlink(missing_ok=True)
+        if not _current(token):
+            return
         if not question:
             print("[Sherpa] Couldn't make out a question.")
             audio.play_cue("error")
@@ -121,21 +188,24 @@ def handle_question() -> None:
             print(f"[Sherpa]   {line.strip()}")
 
         print("[Sherpa] Thinking...")
-        answer = _session.ask(question, ctx)
+        answer = _session.ask(question, ctx, is_current=lambda: _current(token))
+        if not _current(token):
+            print("[Sherpa] (Superseded while thinking — answer discarded.)")
+            return
         print(f"[Sherpa] Answer: {answer}")
 
-        _speak(answer)
+        _speak(answer, token)
 
     except Exception:
-        print("[Sherpa] Something went wrong:")
-        traceback.print_exc()
-        audio.play_cue("error")
+        if _current(token):
+            print("[Sherpa] Something went wrong:")
+            traceback.print_exc()
+            audio.play_cue("error")
     finally:
-        _trail.stop()
+        if _current(token):
+            _trail.stop()
         sampler.discard()  # removes any frame files left by an early exit
-        _busy.release()
-        if _session.pending_end:
-            handle_end()
+        _release(token)
 
 
 def _resolve_taps() -> None:
@@ -146,7 +216,9 @@ def _resolve_taps() -> None:
         threading.Thread(target=handle_start, daemon=True).start()
     elif count == 3:
         threading.Thread(target=handle_end, daemon=True).start()
-    # any other count (1, 4+) is treated as noise and ignored
+    elif count == 1:
+        threading.Thread(target=handle_interrupt, daemon=True).start()
+    # any other count (4+) is treated as noise and ignored
 
 
 def on_press(key) -> None:
@@ -197,7 +269,8 @@ def main() -> None:
     print(
         "Sherpa is running.\n"
         "  Double-tap Right Option  -> start a session\n"
-        "  Shift + Right Option     -> ask a question\n"
+        "  Shift + Right Option     -> ask a question (interrupts Sherpa if she's talking)\n"
+        "  Single tap Right Option  -> stop Sherpa talking\n"
         "  Triple-tap Right Option  -> end the session\n"
         "Ctrl+C to quit."
     )
