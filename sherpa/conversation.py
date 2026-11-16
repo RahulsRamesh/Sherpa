@@ -25,7 +25,7 @@ import time
 import traceback
 from typing import Optional
 
-from . import audio, debug, overlay, stt, tts
+from . import audio, debug, overlay, speechtext, stt, tts
 from .config import VOICE_BARGE_IN
 from .pointer import PointerTracker
 from .sampler import ScreenSampler
@@ -153,11 +153,7 @@ def _is_echo(text: str) -> bool:
         return False
     if _phase != "speaking" and time.monotonic() - _spoken_end_at > ECHO_TAIL_S:
         return False
-    words = re.findall(r"[a-z0-9']+", text.lower())
-    if not words:
-        return False
-    spoken = set(re.findall(r"[a-z0-9']+", _spoken_text.lower()))
-    return sum(w in spoken for w in words) / len(words) >= ECHO_OVERLAP
+    return speechtext.overlap(text, _spoken_text) >= ECHO_OVERLAP
 
 
 # ------------------------------------------------------------ session hotkeys

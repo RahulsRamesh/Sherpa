@@ -12,6 +12,10 @@ from . import brain
 from .overlay import GestureContext
 
 INTERRUPTED_NOTE = " [The user interrupted here, so they may not have heard the rest.]"
+# Every request resends the history, and images dominate its size and latency.
+# Only recent turns keep their frame; older ones are text, which is enough for "what about that one".
+FRAMES_KEPT_TURNS = 2
+MAX_HISTORY_TURNS = 12
 GREETINGS = ["How can I help?", "What's up?", "What do you need?"]
 
 
@@ -51,6 +55,9 @@ class Session:
 
     def commit(self, turn: dict) -> None:
         self.turns.append(turn)
+        del self.turns[:-MAX_HISTORY_TURNS]
+        for old in self.turns[:-FRAMES_KEPT_TURNS]:
+            old["frame_b64"] = ""  # free the memory too
 
     def note_interrupted(self) -> None:
         """The user cut off the last answer mid-speech: tell the model, so it
@@ -61,15 +68,13 @@ class Session:
     def _history_messages(self) -> list:
         messages = []
         for turn in self.turns:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Final screen frame from that earlier question:"},
-                        _image_block(turn["frame_b64"]),
-                        {"type": "text", "text": f"Question: {turn['question']}"},
-                    ],
-                }
-            )
+            content = []
+            if turn["frame_b64"]:
+                content += [
+                    {"type": "text", "text": "Final screen frame from that earlier question:"},
+                    _image_block(turn["frame_b64"]),
+                ]
+            content.append({"type": "text", "text": f"Question: {turn['question']}"})
+            messages.append({"role": "user", "content": content})
             messages.append({"role": "assistant", "content": [{"type": "text", "text": turn["answer"]}]})
         return messages
