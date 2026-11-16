@@ -2,6 +2,7 @@
 
 import base64
 import io
+import json
 import re
 
 from anthropic import Anthropic
@@ -97,6 +98,28 @@ def get_answer(messages: list) -> str:
         text = _trim_to_last_sentence(text)
     debug.save_answer(text)
     return text
+
+
+def ask_json(system: str, content: list, max_tokens: int = 4000) -> dict:
+    """One-off structured question (not part of the spoken conversation): the
+    reply must contain a JSON object, which is parsed and returned."""
+    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=max_tokens,
+        output_config={"effort": EFFORT},
+        system=system,
+        messages=[{"role": "user", "content": content}],
+    )
+    text = " ".join(b.text for b in message.content if b.type == "text")
+    found = re.search(r"\{.*\}", text, re.S)
+    if not found:
+        raise RuntimeError(f"Claude returned no JSON (stop_reason={message.stop_reason}): {text[:200]!r}")
+    return json.loads(found.group(0))
+
+
+def image_block(img: Image.Image) -> dict:
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": encode_pil(img)}}
 
 
 def _trim_to_last_sentence(text: str) -> str:

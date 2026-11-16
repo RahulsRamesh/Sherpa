@@ -9,3 +9,4 @@ soundfile
 requests
 websocket-client
 certifi
+pyobjc-framework-ApplicationServices
