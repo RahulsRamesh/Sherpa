@@ -6,6 +6,8 @@ A screen-aware voice assistant, with follow-up-friendly sessions:
   greeting ("How can I help?") to confirm it's listening.
 - **Shift + Right Option** — ask a question. Captures your screen/cursor
   position, records until you go quiet, and speaks back an answer.
+- **Ctrl + Right Option** — toggle **voice mode**: continuous listening, no
+  hotkey needed per question (see below).
 - **Single tap Right Option** — stop Sherpa talking (or thinking) without
   asking anything new.
 - **Triple-tap Right Option** — end the session immediately, even mid-answer.
@@ -57,6 +59,35 @@ If it doesn't hear anything within 6 seconds, or something errors out,
 you'll hear a low "error" tone instead. Shift + Right Option outside of an
 active session also plays this tone as a reminder to start one first.
 
+## Voice mode
+
+Ctrl + Right Option turns continuous listening on (and starts a session if
+there isn't one); press it again to turn it off. The mic streams live to
+Deepgram. When you pause, what you said is sent to Claude, with the pointer
+trail and screen frames from while you were speaking. You don't press
+anything per question.
+
+- **Cancel and merge.** Pauses are cut short on purpose (~0.6s). If you carry
+  on while Sherpa is still thinking, the earlier request is cancelled and
+  both parts go to Claude as *one* message, with the combined pointer and
+  screen context. Messages waiting for an answer are kept apart from the
+  conversation history, which only ever gets an answer once Sherpa starts
+  speaking it, so nothing is ever recorded twice.
+- **Barge-in.** Talk over Sherpa and she stops. Your words become the next
+  message, and the model is told its previous answer was cut off.
+- **Hearing herself.** There's no acoustic echo cancellation yet. Instead,
+  anything heard while she speaks (and for 2.5s after) that mostly matches
+  her own words is ignored, so she won't answer herself. The console prints
+  what she heard while speaking and how it was classified, so you can see
+  how well this works on your speakers. Headphones avoid the issue. Set
+  `SHERPA_BARGE_IN=0` in `.env` to turn barge-in off entirely.
+- **While it's on**, your mic is live and streaming to Deepgram the whole
+  time (macOS shows its orange mic indicator), which is billed by audio
+  duration. Turn it off when you're not using it. Screen frames are only
+  sampled while you're speaking.
+- The hotkey (Shift + Right Option) still works outside voice mode. In voice
+  mode it just interrupts.
+
 ## Memory and privacy
 
 Within a session, Sherpa keeps a running conversation (your questions, its
@@ -66,10 +97,13 @@ resends it to Claude on every follow-up so it has context.
 Nothing is written to disk longer than it needs to be:
 - The pointer tracker keeps only the last ~45 seconds of pointer positions,
   in memory.
-- Each question's audio recording is deleted right after transcription.
+- Each question's audio recording is deleted right after transcription. In
+  voice mode audio is streamed and never saved.
 - Each answer's audio is deleted right after it's spoken.
 - Screen frames are deleted as soon as they've been read into memory to
-  build the annotated images (or immediately if you say nothing).
+  build the annotated images (or immediately if you say nothing). In voice
+  mode they're kept until the answer starts playing, in case a follow-up
+  gets merged into the same message.
 - Ending a session (triple-tap) clears the in-memory conversation.
 - On every startup, Sherpa also sweeps `sherpa/_tmp/` clean, in case a
   previous run was killed mid-session before it could clean up after

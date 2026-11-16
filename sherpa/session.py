@@ -7,11 +7,11 @@ final frame of each turn's gesture (as base64 in memory). `end()` clears it.
 """
 
 import random
-from typing import Callable
 
 from . import brain
 from .overlay import GestureContext
 
+INTERRUPTED_NOTE = " [The user interrupted here, so they may not have heard the rest.]"
 GREETINGS = ["How can I help?", "What's up?", "What do you need?"]
 
 
@@ -33,7 +33,11 @@ class Session:
         self.active = False
         self.turns = []
 
-    def ask(self, question: str, ctx: GestureContext, is_current: Callable[[], bool] = lambda: True) -> str:
+    def ask(self, question: str, ctx: GestureContext) -> tuple:
+        """Ask Claude about this turn. Returns (answer, turn). Nothing is added
+        to history here: the caller commits the turn only once the answer
+        starts being spoken, so an answer the user never heard (cancelled or
+        merged into a newer message) leaves no trace in the conversation."""
         content = [{"type": "text", "text": ctx.text}]
         last_frame_b64 = ""
         for label, img in ctx.frames:
@@ -43,11 +47,16 @@ class Session:
         content.append({"type": "text", "text": f"Question: {question}"})
 
         answer = brain.get_answer(self._history_messages() + [{"role": "user", "content": content}])
-        # An answer the user interrupted before it was spoken was never heard:
-        # keep it out of history so follow-ups don't build on it.
-        if is_current():
-            self.turns.append({"question": question, "frame_b64": last_frame_b64, "answer": answer})
-        return answer
+        return answer, {"question": question, "frame_b64": last_frame_b64, "answer": answer}
+
+    def commit(self, turn: dict) -> None:
+        self.turns.append(turn)
+
+    def note_interrupted(self) -> None:
+        """The user cut off the last answer mid-speech: tell the model, so it
+        doesn't assume they heard all of it."""
+        if self.turns and not self.turns[-1]["answer"].endswith(INTERRUPTED_NOTE):
+            self.turns[-1]["answer"] += INTERRUPTED_NOTE
 
     def _history_messages(self) -> list:
         messages = []

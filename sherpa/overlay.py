@@ -131,10 +131,12 @@ def build_context(
     window_start: float,
     window_end: float,
     audio_t0: float,
+    consume: bool = True,
 ) -> GestureContext:
     """Assemble the annotated frames and timeline for one question.
 
-    Consumes (and deletes) the keyframe image files.
+    By default consumes (deletes) the keyframe image files; pass consume=False
+    when the same frames may be needed again (e.g. a message that gets merged).
     """
     if not keyframes:
         raise RuntimeError("No screen frames were captured.")
@@ -173,7 +175,8 @@ def build_context(
     for k, kf in enumerate(keyframes):
         raw = Image.open(kf.path)
         raw.load()
-        kf.path.unlink(missing_ok=True)
+        if consume:
+            kf.path.unlink(missing_ok=True)
 
         seg = [p for p in trace if bounds[k] <= p.t < bounds[k + 1]]
         if k > 0 and trace:  # continue the path from the previous interval's last point

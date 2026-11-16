@@ -26,6 +26,10 @@ def check_config() -> None:
         )
 
 
+# Voice mode: stop talking when the user talks over Sherpa. Set SHERPA_BARGE_IN=0
+# to turn it off, e.g. to test whether she hears herself through the speakers.
+VOICE_BARGE_IN = os.environ.get("SHERPA_BARGE_IN", "1").lower() not in ("0", "false", "no")
+
 DEBUG = os.environ.get("SHERPA_DEBUG", "").lower() in ("1", "true", "yes")
 
 TMP_DIR = Path(__file__).parent / "_tmp"
