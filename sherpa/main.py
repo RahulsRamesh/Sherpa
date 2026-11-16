@@ -70,17 +70,37 @@ def handle_question() -> None:
         return
 
     try:
-        print("\n[Sherpa] Triggered — capturing screen...")
-        full_path, crop_path, cursor_pos = capture.capture_context()
-        print(f"[Sherpa] Cursor at {cursor_pos}. Listening...")
+        print("\n[Sherpa] Triggered — listening (capturing screen in parallel)...")
 
-        audio.play_cue("listening")
+        # Screenshot runs alongside recording; it's only needed once the
+        # question is done, so it adds no latency before the mic opens.
+        shot: dict = {}
+
+        def _capture() -> None:
+            try:
+                shot["result"] = capture.capture_context()
+            except Exception as e:
+                shot["error"] = e
+
+        capture_thread = threading.Thread(target=_capture, daemon=True)
+        capture_thread.start()
+
         try:
-            question_audio = audio.record_until_silence()
+            question_audio = audio.record_until_silence(on_started=audio.play_listening_cue)
         except RuntimeError as e:
             print(f"[Sherpa] {e}")
+            capture_thread.join()
+            for p in shot.get("result", ())[:2]:
+                p.unlink(missing_ok=True)
             audio.play_cue("error")
             return
+
+        capture_thread.join()
+        if "error" in shot:
+            question_audio.unlink(missing_ok=True)
+            raise shot["error"]
+        full_path, crop_path, cursor_pos = shot["result"]
+        print(f"[Sherpa] Cursor at {cursor_pos}.")
 
         audio.play_cue("processing")
         print("[Sherpa] Transcribing...")

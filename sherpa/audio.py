@@ -3,6 +3,7 @@
 import subprocess
 import time
 from pathlib import Path
+from typing import Callable, Optional
 
 import numpy as np
 import sounddevice as sd
@@ -15,18 +16,30 @@ CHANNELS = 1
 FRAME_MS = 30
 FRAME_SIZE = int(SAMPLE_RATE * FRAME_MS / 1000)
 
-CALIBRATION_MS = 300
+CUE_GUARD_MS = 250  # ignore detection while the listening cue plays (audio is still kept)
+CALIBRATION_MS = 150  # ambient-noise sample taken right after the cue guard
+MAX_RMS_THRESHOLD = 1500  # cap so speech starting during calibration can't inflate the threshold
 SILENCE_STOP_MS = 900  # stop after this much continuous silence once speech has started
 MAX_WAIT_FOR_SPEECH_S = 6  # give up if user never starts talking
 MAX_RECORD_S = 30  # hard cap on recording length
 MIN_RMS_THRESHOLD = 300  # floor so a dead-silent room doesn't trigger on noise floor
 
+# Bundled, trimmed copy of the macOS "Pop" sound (~0.2s, no trailing silence).
+# Played in-process: spawning afplay costs ~1s of startup per call.
+LISTENING_CUE_PATH = Path(__file__).parent / "sounds" / "pop.wav"
+_listening_cue = sf.read(str(LISTENING_CUE_PATH), dtype="float32")
+
 SYSTEM_SOUNDS = {
-    "listening": "/System/Library/Sounds/Pop.aiff",
     "processing": "/System/Library/Sounds/Tink.aiff",
     "error": "/System/Library/Sounds/Basso.aiff",
     "session_end": "/System/Library/Sounds/Glass.aiff",
 }
+
+
+def play_listening_cue() -> None:
+    """Start the 'recording started' cue without waiting for it to finish."""
+    data, sr = _listening_cue
+    sd.play(data, sr)
 
 
 def play_cue(name: str) -> None:
@@ -39,8 +52,12 @@ def _rms(frame: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(frame.astype(np.float64)))))
 
 
-def record_until_silence() -> Path:
+def record_until_silence(on_started: Optional[Callable[[], None]] = None) -> Path:
     """Record from the mic, auto-stopping after a pause in speech.
+
+    The mic stream is opened first; on_started (e.g. the listening cue) is
+    called once it is live. All audio is kept from the first frame, but
+    speech detection ignores the first CUE_GUARD_MS so the cue can't trigger it.
 
     Returns the path to a 16kHz mono WAV file. Raises RuntimeError if the
     user never starts speaking within MAX_WAIT_FOR_SPEECH_S.
@@ -48,7 +65,7 @@ def record_until_silence() -> Path:
     frames: list[np.ndarray] = []
     calibration_frames: list[np.ndarray] = []
 
-    state = {"phase": "calibrating", "silence_ms": 0, "elapsed_ms": 0, "threshold": MIN_RMS_THRESHOLD}
+    state = {"phase": "cue_guard", "silence_ms": 0, "elapsed_ms": 0, "threshold": MIN_RMS_THRESHOLD}
     stop_flag = {"stop": False, "error": None}
 
     def callback(indata, frame_count, time_info, status):
@@ -56,19 +73,26 @@ def record_until_silence() -> Path:
             raise sd.CallbackStop()
 
         frame = indata[:, 0].copy()
+        frames.append(frame)
         state["elapsed_ms"] += FRAME_MS
+
+        if state["phase"] == "cue_guard":
+            if state["elapsed_ms"] >= CUE_GUARD_MS:
+                state["phase"] = "calibrating"
+                state["elapsed_ms"] = 0
+            return
 
         if state["phase"] == "calibrating":
             calibration_frames.append(frame)
             if state["elapsed_ms"] >= CALIBRATION_MS:
-                ambient_rms = _rms(np.concatenate(calibration_frames)) if calibration_frames else 0.0
-                state["threshold"] = max(MIN_RMS_THRESHOLD, ambient_rms * 3)
+                # Quietest frame, so speech starting mid-window doesn't skew it.
+                ambient_rms = min(_rms(f) for f in calibration_frames)
+                state["threshold"] = min(MAX_RMS_THRESHOLD, max(MIN_RMS_THRESHOLD, ambient_rms * 3))
                 state["phase"] = "waiting_for_speech"
                 state["elapsed_ms"] = 0
             return
 
         level = _rms(frame)
-        frames.append(frame)
 
         if state["phase"] == "waiting_for_speech":
             if level >= state["threshold"]:
@@ -97,6 +121,8 @@ def record_until_silence() -> Path:
         dtype="int16",
         callback=callback,
     ):
+        if on_started is not None:
+            on_started()
         while not stop_flag["stop"]:
             time.sleep(0.02)
 
