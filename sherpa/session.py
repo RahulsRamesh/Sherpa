@@ -50,8 +50,12 @@ class Session:
             content.append(_image_block(last_frame_b64))
         content.append({"type": "text", "text": f"Question: {question}"})
 
-        answer = brain.get_answer(self._history_messages() + [{"role": "user", "content": content}])
-        return answer, {"question": question, "frame_b64": last_frame_b64, "answer": answer}
+        answer, steps = brain.get_answer(self._history_messages() + [{"role": "user", "content": content}])
+        remembered = answer
+        if steps:  # so follow-ups ("ok what's next?") know what she walked them through
+            route = " -> ".join(str(st.get("target", "")) for st in steps)
+            remembered += f" [I then pointed them through: {route}]"
+        return answer, {"question": question, "frame_b64": last_frame_b64, "answer": remembered, "steps": steps}
 
     def commit(self, turn: dict) -> None:
         self.turns.append(turn)

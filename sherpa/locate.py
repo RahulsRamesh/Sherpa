@@ -67,6 +67,7 @@ class Located:
     how: str  # "accessibility" | "claude-element" | "vision"
     label: str = ""
     approximate: bool = False  # vision position that should be checked with refine()
+    radius: float = 80.0  # a click this close counts as "on it"
 
 
 # ---------------------------------------------------------------- screenshots
@@ -91,6 +92,10 @@ def _scaled(img: Image.Image) -> Image.Image:
 
 
 # ---------------------------------------------------------------- locate
+def _radius(e) -> float:
+    return max(40.0, max(e.frame[2], e.frame[3]) / 2 + 25)
+
+
 def locate(query: str, context: str = "") -> Optional[Located]:
     """Find `query` (e.g. "the Save button") on the current screen.
 
@@ -110,7 +115,7 @@ def locate(query: str, context: str = "") -> Optional[Located]:
     best = accessibility.confident(matches)
     if best is not None:
         x, y = best.element.aim
-        return Located(x, y, "accessibility", best.element.label)
+        return Located(x, y, "accessibility", best.element.label, radius=_radius(best.element))
 
     return _ask_claude(query, context, elements, matches)
 
@@ -156,7 +161,7 @@ def _ask_claude(query: str, context: str, elements: list, matches: list) -> Opti
         except (ValueError, IndexError, TypeError):
             return None
         x, y = e.aim
-        return Located(x, y, "claude-element", e.label)
+        return Located(x, y, "claude-element", e.label, radius=_radius(e))
     if "x" in reply and "y" in reply:
         scale = rect[2] / shown.size[0]
         return Located(rect[0] + float(reply["x"]) * scale, rect[1] + float(reply["y"]) * scale, "vision", approximate=True)

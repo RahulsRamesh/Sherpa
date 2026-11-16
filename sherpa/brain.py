@@ -58,8 +58,59 @@ SYSTEM_PROMPT = (
     "error message\") rather than saying 'in the screenshot', 'in the "
     "image', 'the trail' or 'the yellow box'.\n"
     "- If it's genuinely unclear what they're pointing at, say so briefly "
-    "and ask a short clarifying question instead of guessing."
+    "and ask a short clarifying question instead of guessing.\n\n"
+    "Showing, not just telling: when the user asks how to DO something on their "
+    "computer that comes down to clicking through what's on screen (\"how do I save "
+    "this\", \"where's the setting for X\"), also call the guide_steps tool. Sherpa "
+    "then moves her own cursor to each target in turn, speaks that step's line, and "
+    "waits for the user to click it before moving on. Your spoken reply in that case "
+    "is just one short lead-in like \"Sure, I'll walk you through it.\" Do not read "
+    "the steps out in the reply. Plan one click per step, in order, naming each "
+    "target by its visible label and kind (\"the File menu\", \"Save As in the File "
+    "menu\", \"the name field in the save dialog\", \"the Save button\"); a menu "
+    "and the item inside it are separate steps. Targets are looked up on the live "
+    "screen when their turn comes, so later steps may be for things not showing yet. "
+    "Don't call the tool for questions that are only about understanding something, "
+    "and don't invent steps for things you can't tell are there."
 )
+
+GUIDE_TOOL = {
+    "name": "guide_steps",
+    "description": (
+        "Walk the user through a task by pointing Sherpa's own cursor at each thing to click, in order."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 10,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "description": "What to point at, as a person would describe it: label and kind, e.g. 'the File menu'.",
+                        },
+                        "label": {"type": "string", "description": "One to three words shown on the cursor's name tag."},
+                        "say": {
+                            "type": "string",
+                            "description": "Short spoken instruction for this step, e.g. 'Open the File menu.'",
+                        },
+                        "advance": {
+                            "type": "string",
+                            "enum": ["click", "after_speech"],
+                            "description": "'click' waits for the user to click the target (default); 'after_speech' moves on after speaking, for pointing out something that isn't clicked.",
+                        },
+                    },
+                    "required": ["target", "say"],
+                },
+            }
+        },
+        "required": ["steps"],
+    },
+}
 
 
 def encode_pil(img: Image.Image) -> str:
@@ -72,9 +123,10 @@ def encode_pil(img: Image.Image) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def get_answer(messages: list) -> str:
-    """Send a pre-built conversation (see session.py) to Claude and return
-    the assistant's reply text."""
+def get_answer(messages: list) -> tuple:
+    """Send a pre-built conversation (see session.py) to Claude. Returns
+    (reply text, guide steps); steps is a list of dicts, empty unless Claude
+    chose to walk the user through something."""
     debug.save_request(SYSTEM_PROMPT, messages)
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -84,20 +136,28 @@ def get_answer(messages: list) -> str:
         output_config={"effort": EFFORT},
         system=SYSTEM_PROMPT,
         messages=messages,
+        tools=[GUIDE_TOOL],
     )
+
+    steps: list = []
+    for block in message.content:
+        if block.type == "tool_use" and block.name == "guide_steps":
+            steps = list((block.input or {}).get("steps") or [])
 
     parts = [block.text for block in message.content if block.type == "text"]
     text = " ".join(parts).strip()
 
     # An empty answer must never reach session history: the API rejects empty
     # text blocks, so it would break every later question in the session.
+    if not text and steps:
+        text = "Sure, I'll walk you through it."
     if not text:
         raise RuntimeError(f"Claude returned no text (stop_reason={message.stop_reason})")
 
     if message.stop_reason == "max_tokens":
         text = _trim_to_last_sentence(text)
-    debug.save_answer(text)
-    return text
+    debug.save_answer(text if not steps else text + "\n[guide_steps] " + json.dumps(steps))
+    return text, steps
 
 
 def ask_json(system: str, content: list, max_tokens: int = 4000) -> dict:

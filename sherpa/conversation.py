@@ -3,7 +3,8 @@
 Ownership. Every question or greeting takes a new token. Work belonging to an
 older token is superseded: it stops speaking and its results are thrown away
 (network calls already in flight can't be cancelled, but their output is
-dropped). Phases: idle | listening (hotkey recording) | working | speaking.
+dropped). Phases: idle | listening (hotkey recording) | working | speaking | guiding
+(pointing the user through steps with her own cursor).
 
 History and merging. The session's history only ever holds answers the user
 actually started hearing. Messages that are still awaiting an answer live in
@@ -25,7 +26,7 @@ import time
 import traceback
 from typing import Optional
 
-from . import audio, debug, overlay, speechtext, stt, tts
+from . import audio, debug, guidance, overlay, speechtext, stt, tts
 from .config import VOICE_BARGE_IN
 from .pointer import PointerTracker
 from .sampler import ScreenSampler
@@ -85,7 +86,7 @@ def _supersede(new_phase: str) -> tuple:
     that was working or speaking is now stale and playback is cut off."""
     global _token, _phase
     with _state_lock:
-        was_active = _phase in ("working", "speaking")
+        was_active = _phase in ("working", "speaking", "guiding")
         if _phase == "speaking" and _last_spoken_is_turn:
             session.note_interrupted()
         _token += 1
@@ -99,7 +100,7 @@ def handle_interrupt() -> None:
     """Stop talking/working without starting a new question."""
     global _token, _phase
     with _state_lock:
-        if _phase not in ("working", "speaking"):
+        if _phase not in ("working", "speaking", "guiding"):
             return
         if _phase == "speaking" and _last_spoken_is_turn:
             session.note_interrupted()
@@ -144,6 +145,20 @@ def _speak(text: str, token: int, turn: Optional[dict] = None) -> None:
     finally:
         _spoken_end_at = time.monotonic()
         path.unlink(missing_ok=True)
+
+
+def _guide(token: int, turn: dict, task: str) -> None:
+    """If the answer came with steps, point the user through them. Ends when
+    done, or as soon as this token is superseded (interrupt, new question)."""
+    steps = guidance.parse_steps(turn.get("steps"))
+    if not steps or not _set_phase(token, "guiding"):
+        return
+
+    def speak(text: str) -> None:
+        _speak(text, token)
+        _set_phase(token, "guiding")  # _speak leaves the phase as "speaking"
+
+    guidance.run(steps, task, still_wanted=lambda: _current(token), speak=speak)
 
 
 def _is_echo(text: str) -> bool:
@@ -254,6 +269,7 @@ def handle_question() -> None:
         print(f"[Sherpa] Answer: {answer}")
 
         _speak(answer, token, turn)
+        _guide(token, turn, question)
 
     except Exception:
         if _current(token):
@@ -483,6 +499,7 @@ def _process_pending(token: int, snapshot: list) -> None:
             return
         print(f"[Sherpa] Answer: {answer}")
         _speak(answer, token, turn)
+        _guide(token, turn, question)
     except Exception:
         if _current(token):
             print("[Sherpa] Something went wrong:")

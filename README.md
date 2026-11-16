@@ -88,6 +88,29 @@ anything per question.
 - The hotkey (Shift + Right Option) still works outside voice mode. In voice
   mode it just interrupts.
 
+## Guided pointing
+
+Ask how to *do* something ("how do I save this as a new file?") and Sherpa
+doesn't just describe it: a blue cursor labelled "Sherpa" appears, glides to
+the first thing to click, and says what to do. When you click it, she moves
+to the next one. She never clicks for you, and your own mouse is untouched.
+
+- **Finding things.** Each step is looked up on your screen as it is *right
+  now*, so a button that isn't where expected is found where it is. First
+  choice is the macOS Accessibility API (exact positions, no model call);
+  if the name is ambiguous or the app doesn't expose it, Claude picks from a
+  screenshot, and a position from vision is checked with a zoomed look at where
+  her cursor landed. If something can't be found she says so instead of
+  pointing at a guess.
+- **Menus.** She points at the menu title first; once you open it, she finds
+  the item inside.
+- **Her cursor is visible to Claude** in later screenshots (yours is not), so
+  it can check and refer to where she pointed.
+- **Stopping.** A tap of Right Option, Shift + Right Option, or just asking
+  something new ends the guide. It also ends after 60s without a click.
+- Try the pieces on their own: `python -m sherpa.guide` (cursor demo),
+  `python -m sherpa.accessibility dump`, `python -m sherpa.locate "the File menu"`.
+
 ## Memory and privacy
 
 Within a session, Sherpa keeps a running conversation (your questions, its
