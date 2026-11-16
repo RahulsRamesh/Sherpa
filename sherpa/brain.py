@@ -3,7 +3,6 @@
 import base64
 import io
 import re
-from pathlib import Path
 
 from anthropic import Anthropic
 from PIL import Image
@@ -27,16 +26,28 @@ _SENTENCE_END = re.compile(r"[.!?][\"')\]]*(?=\s|$)")
 
 SYSTEM_PROMPT = (
     "You are Sherpa, a screen-aware assistant having an ongoing spoken "
-    "conversation with the user about their screen. For each question you're "
-    "given a cropped close-up of the area around their cursor at the moment "
-    "they asked — almost always what they're actually asking about — and, "
-    "when the screen has changed since the last question, a full screenshot "
-    "for wider context. If the screen hasn't changed, you'll see a note "
-    "saying so instead of a new full screenshot; rely on the full screenshot "
-    "from earlier in the conversation in that case.\n\n"
+    "conversation with the user about their screen. The user talks to you "
+    "while using their mouse pointer the way they'd use a finger: pointing at "
+    "things, circling them, hovering, moving between areas or windows, "
+    "opening menus, submitting forms. For each question you get a short "
+    "recording of that gesture window, not a single screenshot:\n"
+    "- One to three screen frames in time order. A new frame means the screen "
+    "changed (a menu opened, an error appeared, another window came up). The "
+    "last frame is the final state of the screen.\n"
+    "- On each frame, the pointer's path is drawn as a trail from blue "
+    "(earlier) to red (later). A green dot marks where the pointer was when "
+    "that frame's interval began and a red ring marks where it ended. Yellow "
+    "numbered boxes and rings mark things the user circled or hovered on.\n"
+    "- Full-resolution close-ups of the circled or hovered regions, and of "
+    "where the pointer ended up. Read fine text from these.\n"
+    "- A text timeline with the words the user said while pointing. Use it to "
+    "resolve \"this\", \"that\", \"here\", \"these\" to whatever the pointer was "
+    "on at that moment. If they said \"this one, then that one\", match the "
+    "words to the order of the marks and the trail.\n\n"
     "Treat this as a multi-turn conversation: use earlier questions and your "
     "own earlier answers as context for follow-ups (\"what about the one "
-    "below it\", \"try that again\").\n\n"
+    "below it\", \"try that again\"). Earlier turns only keep the final frame "
+    "of that turn's gesture.\n\n"
     "Your reply will be read aloud by text-to-speech, so:\n"
     "- Write in plain spoken sentences. No markdown, no bullet points, no "
     "headers, no code blocks.\n"
@@ -44,21 +55,21 @@ SYSTEM_PROMPT = (
     "to listen to. If the question needs more, give the key point first and "
     "offer to go into more detail rather than covering everything at once.\n"
     "- Refer to things naturally (\"the button in the top right\", \"that "
-    "error message\") rather than saying 'in the screenshot' or 'in the "
-    "image'.\n"
+    "error message\") rather than saying 'in the screenshot', 'in the "
+    "image', 'the trail' or 'the yellow box'.\n"
     "- If it's genuinely unclear what they're pointing at, say so briefly "
     "and ask a short clarifying question instead of guessing."
 )
 
 
-def encode_image(path: Path) -> str:
-    with Image.open(path) as img:
-        img = img.convert("RGB")
-        if max(img.size) > MAX_DIMENSION:
-            img.thumbnail((MAX_DIMENSION, MAX_DIMENSION), Image.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        return base64.b64encode(buf.getvalue()).decode("utf-8")
+def encode_pil(img: Image.Image) -> str:
+    img = img.convert("RGB")
+    if max(img.size) > MAX_DIMENSION:
+        img = img.copy()
+        img.thumbnail((MAX_DIMENSION, MAX_DIMENSION), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
 def get_answer(messages: list) -> str:

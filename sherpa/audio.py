@@ -21,7 +21,7 @@ CALIBRATION_MS = 150  # ambient-noise sample taken right after the cue guard
 MAX_RMS_THRESHOLD = 1500  # cap so speech starting during calibration can't inflate the threshold
 SILENCE_STOP_MS = 900  # stop after this much continuous silence once speech has started
 MAX_WAIT_FOR_SPEECH_S = 6  # give up if user never starts talking
-MAX_RECORD_S = 30  # hard cap on recording length
+MAX_RECORD_S = 20  # hard cap on the gesture window / recording length
 MIN_RMS_THRESHOLD = 300  # floor so a dead-silent room doesn't trigger on noise floor
 
 # Bundled, trimmed copy of the macOS "Pop" sound (~0.2s, no trailing silence).
@@ -42,25 +42,31 @@ def play_listening_cue() -> None:
     sd.play(data, sr)
 
 
-def play_cue(name: str) -> None:
+def play_cue(name: str, wait: bool = True) -> None:
     path = SYSTEM_SOUNDS.get(name)
-    if path:
+    if not path:
+        return
+    if wait:
         subprocess.run(["afplay", path], check=False)
+    else:
+        subprocess.Popen(["afplay", path])
 
 
 def _rms(frame: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(frame.astype(np.float64)))))
 
 
-def record_until_silence(on_started: Optional[Callable[[], None]] = None) -> Path:
+def record_until_silence(on_started: Optional[Callable[[], None]] = None) -> tuple:
     """Record from the mic, auto-stopping after a pause in speech.
 
     The mic stream is opened first; on_started (e.g. the listening cue) is
     called once it is live. All audio is kept from the first frame, but
     speech detection ignores the first CUE_GUARD_MS so the cue can't trigger it.
 
-    Returns the path to a 16kHz mono WAV file. Raises RuntimeError if the
-    user never starts speaking within MAX_WAIT_FOR_SPEECH_S.
+    Returns (path to a 16kHz mono WAV file, time.monotonic() when the audio
+    started) so word timestamps can be lined up with the pointer trace.
+    Raises RuntimeError if the user never starts speaking within
+    MAX_WAIT_FOR_SPEECH_S.
     """
     frames: list[np.ndarray] = []
     calibration_frames: list[np.ndarray] = []
@@ -121,6 +127,7 @@ def record_until_silence(on_started: Optional[Callable[[], None]] = None) -> Pat
         dtype="int16",
         callback=callback,
     ):
+        started_at = time.monotonic()
         if on_started is not None:
             on_started()
         while not stop_flag["stop"]:
@@ -132,7 +139,7 @@ def record_until_silence(on_started: Optional[Callable[[], None]] = None) -> Pat
     audio = np.concatenate(frames) if frames else np.zeros(0, dtype=np.int16)
     out_path = TMP_DIR / f"question_{int(time.time() * 1000)}.wav"
     sf.write(str(out_path), audio, SAMPLE_RATE, subtype="PCM_16")
-    return out_path
+    return out_path, started_at
 
 
 def play_audio_file(path: Path) -> None:

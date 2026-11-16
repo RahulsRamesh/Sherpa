@@ -17,13 +17,25 @@ that one" / "try that again" style questions.
 
 1. Double-tap Right Option → a short spoken greeting confirms the session
    has started. No screen capture or API calls happen for this step.
-2. Shift + Right Option → Sherpa screenshots your full screen and crops a
-   region around your cursor, plays a short "pop" cue, and starts listening.
-3. It auto-stops recording after ~0.9s of silence (or 30s max).
-4. Your question is transcribed (Deepgram) and sent to Claude along with
-   the crop and (usually) the full screenshot, plus the running
-   conversation so far. The answer is spoken back to you (ElevenLabs).
-5. Repeat step 2-4 for follow-ups, or triple-tap to end the session.
+2. Shift + Right Option → a short "pop" plays and Sherpa starts listening
+   (and watching your pointer) at once. Talk while you point, circle,
+   hover, open menus, or switch windows. It auto-stops after ~0.9s of
+   silence, or after 20s.
+3. During that window Sherpa records:
+   - **Your pointer's path**, from an always-on in-memory tracker.
+   - **Screen frames** of the display your pointer is on: one at the start,
+     plus another whenever the screen visibly changes (a dropdown opens, an
+     error appears, you switch windows), up to 3, plus a final one.
+   - **Gestures**, detected locally: circling something, and hovering on
+     something.
+   - **Word timestamps** for what you said (Deepgram), so "this one" can be
+     matched to where the pointer was at that moment.
+4. Claude receives the frames with your pointer trail drawn on them (blue =
+   earlier, red = later, numbered marks where you circled or hovered),
+   full-resolution close-ups of the circled/hovered spots and where the
+   pointer ended, and a text timeline of speech against pointer movement.
+   The answer is spoken back (ElevenLabs).
+5. Repeat step 2 for follow-ups, or triple-tap to end the session.
 
 If it doesn't hear anything within 6 seconds, or something errors out,
 you'll hear a low "error" tone instead. Shift + Right Option outside of an
@@ -32,18 +44,16 @@ active session also plays this tone as a reminder to start one first.
 ## Memory and privacy
 
 Within a session, Sherpa keeps a running conversation (your questions, its
-answers, and the cursor close-up from each turn) in memory, and resends it
-to Claude on every follow-up so it has context. The **full screenshot**
-is only resent when the screen has actually changed since the last
-question — a cheap local comparison (no API call) decides this, ignoring
-trivial differences like a blinking cursor or a clock ticking in the menu
-bar, so identical-looking screens don't get re-sent or re-billed.
+answers, and the final annotated frame from each turn) in memory, and
+resends it to Claude on every follow-up so it has context.
 
 Nothing is written to disk longer than it needs to be:
+- The pointer tracker keeps only the last ~45 seconds of pointer positions,
+  in memory.
 - Each question's audio recording is deleted right after transcription.
 - Each answer's audio is deleted right after it's spoken.
-- Each turn's screenshots are deleted right after they're read into memory
-  for that Claude call — the app never needs the file again afterward.
+- Screen frames are deleted as soon as they've been read into memory to
+  build the annotated images (or immediately if you say nothing).
 - Ending a session (triple-tap) clears the in-memory conversation.
 - On every startup, Sherpa also sweeps `sherpa/_tmp/` clean, in case a
   previous run was killed mid-session before it could clean up after
@@ -81,7 +91,7 @@ permissions granted in **System Settings → Privacy & Security**:
 
 - **Screen Recording** — to take screenshots
 - **Microphone** — to record your question
-- **Accessibility** — to detect the global double-tap hotkey
+- **Accessibility** — to detect the global hotkey and track the pointer
 
 The first run will likely trigger a couple of these prompts automatically;
 if a step silently fails or hangs, check that all three are granted, then
@@ -100,6 +110,9 @@ anywhere to start a session.
 
 ## Known limitations
 
+- Circle and hover detection thresholds (in `sherpa/pointer.py`) are first
+  guesses and may need tuning. Frames are sampled with `screencapture`, so
+  roughly 2-3 per second at most.
 - Silence detection uses a simple energy threshold calibrated against a
   short ambient-noise sample at the start of each recording — it may need
   tuning if your environment is noisy.

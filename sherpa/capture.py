@@ -5,21 +5,13 @@ on external monitors as well as the main display.
 """
 
 import subprocess
-import time
 from pathlib import Path
 from typing import Tuple
 
 import Quartz
-from PIL import Image
 from pynput.mouse import Controller
 
-from .config import TMP_DIR
-
 _mouse = Controller()
-
-# Size (in points) of the region captured around the cursor.
-CROP_WIDTH = 900
-CROP_HEIGHT = 700
 
 _MAX_DISPLAYS = 16
 
@@ -54,48 +46,12 @@ def _display_under_cursor(cursor_x: int, cursor_y: int) -> Tuple[int, Tuple[int,
     return index, rect
 
 
-def _region_around_cursor(
-    cursor_x: int, cursor_y: int, display: Tuple[int, int, int, int]
-) -> Tuple[int, int, int, int]:
-    """Crop rect in display-local points, clamped to the display."""
-    disp_x, disp_y, disp_w, disp_h = display
+def grab_display_under_cursor(path: Path) -> Tuple[int, Tuple[int, int, int, int]]:
+    """Screenshot the display the pointer is on to `path`.
 
-    w = min(CROP_WIDTH, disp_w)
-    h = min(CROP_HEIGHT, disp_h)
-
-    x = cursor_x - disp_x - w // 2
-    y = cursor_y - disp_y - h // 2
-
-    x = max(0, min(x, disp_w - w))
-    y = max(0, min(y, disp_h - h))
-
-    return x, y, w, h
-
-
-def capture_context() -> Tuple[Path, Path, Tuple[int, int]]:
-    """Screenshot the display under the cursor plus a crop around the cursor.
-
-    Returns (full_screenshot_path, crop_path, cursor_position).
+    Returns (display index, display bounds in global points) so callers can
+    map global pointer coordinates onto the image.
     """
-    cursor_pos = get_cursor_position()
-    ts = int(time.time() * 1000)
-
-    full_path = TMP_DIR / f"full_{ts}.png"
-    crop_path = TMP_DIR / f"crop_{ts}.png"
-
-    index, display = _display_under_cursor(*cursor_pos)
-    subprocess.run(
-        ["screencapture", "-x", f"-D{index}", str(full_path)],
-        check=True,
-    )
-
-    # Crop from the full capture rather than a second screencapture -R call:
-    # it avoids negative global coordinates on displays left of/above the
-    # main one, and guarantees both images come from the same instant.
-    x, y, w, h = _region_around_cursor(*cursor_pos, display)
-    with Image.open(full_path) as img:
-        scale = img.width / display[2]  # pixels per point (2.0 on Retina)
-        box = tuple(round(v * scale) for v in (x, y, x + w, y + h))
-        img.crop(box).save(crop_path)
-
-    return full_path, crop_path, cursor_pos
+    index, rect = _display_under_cursor(*get_cursor_position())
+    subprocess.run(["screencapture", "-x", f"-D{index}", str(path)], check=True)
+    return index, rect

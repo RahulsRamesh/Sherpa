@@ -1,21 +1,21 @@
 """Conversation state for a Sherpa session: start greeting, per-turn message
-building (with full-screenshot dedup against imgdiff), and file cleanup.
+building from a gesture window, and in-memory history.
 
-Note: crop and full-screenshot files are deleted as soon as they've been
-read into memory (their base64 lives in `turns`/the outgoing message, not
-the file), so there's nothing screenshot-related left to purge by the time
-a session ends — `end()` just clears in-memory state.
+Nothing screen-related is ever written to disk here: the annotated frames
+are encoded straight into the outgoing message, and history keeps only the
+final frame of each turn's gesture (as base64 in memory). `end()` clears it.
 """
 
 import random
-from pathlib import Path
-from typing import Optional
 
-import numpy as np
-
-from . import brain, imgdiff
+from . import brain
+from .overlay import GestureContext
 
 GREETINGS = ["How can I help?", "What's up?", "What do you need?"]
+
+
+def _image_block(b64: str) -> dict:
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}}
 
 
 class Session:
@@ -23,72 +23,46 @@ class Session:
         self.active = False
         self.pending_end = False
         self.turns: list[dict] = []
-        self._last_full_thumb: Optional[np.ndarray] = None
 
     def start(self) -> str:
         self.active = True
         self.pending_end = False
         self.turns = []
-        self._last_full_thumb = None
         return random.choice(GREETINGS)
 
     def end(self) -> None:
         self.active = False
         self.pending_end = False
         self.turns = []
-        self._last_full_thumb = None
 
-    def ask(self, question: str, full_path: Path, crop_path: Path) -> str:
-        crop_b64 = brain.encode_image(crop_path)
-        crop_path.unlink(missing_ok=True)
+    def ask(self, question: str, ctx: GestureContext) -> str:
+        content = [{"type": "text", "text": ctx.text}]
+        last_frame_b64 = ""
+        for label, img in ctx.frames:
+            last_frame_b64 = brain.encode_pil(img)
+            content.append({"type": "text", "text": f"{label}:"})
+            content.append(_image_block(last_frame_b64))
+        for label, img in ctx.closeups:
+            content.append({"type": "text", "text": f"{label}:"})
+            content.append(_image_block(brain.encode_pil(img)))
+        content.append({"type": "text", "text": f"Question: {question}"})
 
-        full_thumb = imgdiff.thumbnail_of(full_path)
-        screen_changed = self._last_full_thumb is None or not imgdiff.is_similar_thumb(
-            full_thumb, self._last_full_thumb
-        )
-
-        full_b64 = None
-        if screen_changed:
-            full_b64 = brain.encode_image(full_path)
-            self._last_full_thumb = full_thumb
-        full_path.unlink(missing_ok=True)
-
-        messages = self._build_messages(question, crop_b64, full_b64)
-        answer = brain.get_answer(messages)
-
-        self.turns.append({"question": question, "crop_b64": crop_b64, "answer": answer})
+        answer = brain.get_answer(self._history_messages() + [{"role": "user", "content": content}])
+        self.turns.append({"question": question, "frame_b64": last_frame_b64, "answer": answer})
         return answer
 
-    def _build_messages(self, question: str, crop_b64: str, full_b64: Optional[str]) -> list:
+    def _history_messages(self) -> list:
         messages = []
         for turn in self.turns:
             messages.append(
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "image",
-                            "source": {"type": "base64", "media_type": "image/jpeg", "data": turn["crop_b64"]},
-                        },
+                        {"type": "text", "text": "Final screen frame from that earlier question:"},
+                        _image_block(turn["frame_b64"]),
                         {"type": "text", "text": f"Question: {turn['question']}"},
                     ],
                 }
             )
             messages.append({"role": "assistant", "content": [{"type": "text", "text": turn["answer"]}]})
-
-        new_content = []
-        if full_b64 is not None:
-            new_content.append({"type": "text", "text": "Full screen:"})
-            new_content.append(
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": full_b64}}
-            )
-        else:
-            new_content.append({"type": "text", "text": "Screen unchanged since your last question."})
-        new_content.append({"type": "text", "text": "Close-up of where the cursor is pointing:"})
-        new_content.append(
-            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": crop_b64}}
-        )
-        new_content.append({"type": "text", "text": f"Question: {question}"})
-
-        messages.append({"role": "user", "content": new_content})
         return messages

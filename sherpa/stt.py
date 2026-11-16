@@ -15,6 +15,12 @@ DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"
 
 
 def transcribe(audio_path: Path) -> str:
+    return transcribe_with_words(audio_path)[0]
+
+
+def transcribe_with_words(audio_path: Path) -> tuple:
+    """Return (transcript, words); each word is {"word", "start", "end"} with
+    times in seconds from the start of the audio file."""
     with open(audio_path, "rb") as f:
         audio_bytes = f.read()
 
@@ -37,8 +43,13 @@ def transcribe(audio_path: Path) -> str:
     data = response.json()
 
     try:
-        transcript = data["results"]["channels"][0]["alternatives"][0]["transcript"]
+        alt = data["results"]["channels"][0]["alternatives"][0]
+        transcript = alt["transcript"]
+        words = [
+            {"word": w.get("punctuated_word") or w["word"], "start": w["start"], "end": w["end"]}
+            for w in alt.get("words", [])
+        ]
     except (KeyError, IndexError):
-        transcript = ""
+        transcript, words = "", []
 
-    return transcript.strip()
+    return transcript.strip(), words

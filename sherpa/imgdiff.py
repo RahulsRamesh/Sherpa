@@ -23,3 +23,12 @@ def is_similar_thumb(thumb_a: np.ndarray, thumb_b: np.ndarray, tolerance: float 
 
 def is_similar(path_a: Path, path_b: Path, tolerance: float = DEFAULT_TOLERANCE) -> bool:
     return is_similar_thumb(thumbnail_of(path_a), thumbnail_of(path_b), tolerance)
+
+
+def changed_fraction(thumb_a: np.ndarray, thumb_b: np.ndarray, level: float = 10.0) -> float:
+    """Fraction of thumbnail cells that differ by more than `level` (0-255).
+
+    More sensitive to a small local change (a dropdown opening, an error
+    banner) than the mean difference, while still ignoring a ticking clock
+    or blinking cursor, which touch only a cell or two."""
+    return float(np.mean(np.abs(thumb_a - thumb_b) > level))

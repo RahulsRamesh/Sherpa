@@ -6,13 +6,16 @@ Triple-tap Right Option  -> end the session (purges retained files).
 """
 
 import threading
+import time
 import traceback
 from typing import Optional
 
 from pynput import keyboard
 
-from . import audio, capture, stt, tts
+from . import audio, overlay, stt, tts
 from .config import TMP_DIR, check_config
+from .pointer import PointerTracker
+from .sampler import ScreenSampler
 from .session import Session
 
 TAP_WINDOW_S = 0.4
@@ -27,6 +30,7 @@ _tap_count = 0
 _tap_timer: Optional[threading.Timer] = None
 
 _session = Session()
+_tracker = PointerTracker()
 
 
 def _speak(text: str) -> None:
@@ -69,42 +73,27 @@ def handle_question() -> None:
         print("[Sherpa] Still working on the last question — ignoring trigger.")
         return
 
+    sampler = ScreenSampler()
     try:
-        print("\n[Sherpa] Triggered — listening (capturing screen in parallel)...")
+        window_start = time.monotonic()
+        print("\n[Sherpa] Triggered — listening (tracking pointer + screen)...")
 
-        # Screenshot runs alongside recording; it's only needed once the
-        # question is done, so it adds no latency before the mic opens.
-        shot: dict = {}
-
-        def _capture() -> None:
-            try:
-                shot["result"] = capture.capture_context()
-            except Exception as e:
-                shot["error"] = e
-
-        capture_thread = threading.Thread(target=_capture, daemon=True)
-        capture_thread.start()
-
+        # Screen frames are sampled in the background for the whole gesture
+        # window; the pointer trace comes from the always-on tracker.
+        sampler.start()
         try:
-            question_audio = audio.record_until_silence(on_started=audio.play_listening_cue)
+            question_audio, audio_t0 = audio.record_until_silence(on_started=audio.play_listening_cue)
         except RuntimeError as e:
             print(f"[Sherpa] {e}")
-            capture_thread.join()
-            for p in shot.get("result", ())[:2]:
-                p.unlink(missing_ok=True)
+            sampler.discard()
             audio.play_cue("error")
             return
+        window_end = time.monotonic()
+        sampler.stop()  # grabs one last frame in the background while we transcribe
 
-        capture_thread.join()
-        if "error" in shot:
-            question_audio.unlink(missing_ok=True)
-            raise shot["error"]
-        full_path, crop_path, cursor_pos = shot["result"]
-        print(f"[Sherpa] Cursor at {cursor_pos}.")
-
-        audio.play_cue("processing")
+        audio.play_cue("processing", wait=False)
         print("[Sherpa] Transcribing...")
-        question = stt.transcribe(question_audio)
+        question, words = stt.transcribe_with_words(question_audio)
         question_audio.unlink(missing_ok=True)
         if not question:
             print("[Sherpa] Couldn't make out a question.")
@@ -112,8 +101,16 @@ def handle_question() -> None:
             return
         print(f"[Sherpa] Question: {question}")
 
+        keyframes = sampler.finish()
+        trace = _tracker.since(window_start, window_end)
+        ctx = overlay.build_context(keyframes, trace, words, window_start, window_end, audio_t0)
+        gestures = [l for l in ctx.text.splitlines() if l.lstrip().startswith("[")]
+        print(f"[Sherpa] {len(ctx.frames)} frame(s), {len(ctx.closeups)} close-up(s), {len(gestures)} gesture(s).")
+        for line in gestures:
+            print(f"[Sherpa]   {line.strip()}")
+
         print("[Sherpa] Thinking...")
-        answer = _session.ask(question, full_path, crop_path)
+        answer = _session.ask(question, ctx)
         print(f"[Sherpa] Answer: {answer}")
 
         _speak(answer)
@@ -123,6 +120,7 @@ def handle_question() -> None:
         traceback.print_exc()
         audio.play_cue("error")
     finally:
+        sampler.discard()  # removes any frame files left by an early exit
         _busy.release()
         if _session.pending_end:
             handle_end()
@@ -183,6 +181,7 @@ def _sweep_tmp_dir() -> None:
 def main() -> None:
     check_config()
     _sweep_tmp_dir()
+    _tracker.start()
     print(
         "Sherpa is running.\n"
         "  Double-tap Right Option  -> start a session\n"
