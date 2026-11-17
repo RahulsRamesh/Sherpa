@@ -61,7 +61,22 @@ MAX_MERGED_FRAMES = 8  # cap on screen frames sent when several utterances are m
 BARGE_IN_MIN_WORDS = 2  # words heard over Sherpa before she stops talking
 ECHO_OVERLAP = 0.6  # fraction of heard words found in what she's saying => it's her own voice
 ECHO_TAIL_S = 2.5  # keep guarding this long after she stops (room echo, late transcripts)
-FILLER_DELAY_S = 0.6  # play a "plan" filler if Claude's first text hasn't arrived by then
+# A "plan" filler plays only when Claude is slower than usual. "Usual" is the median
+# of how long recent turns took to produce their first text (or, for a tool-only
+# guide reply, the whole plan); the filler fires at FILLER_FACTOR times that,
+# never sooner than FILLER_MIN_S, and at FILLER_DEFAULT_S until we have a few samples.
+FILLER_FACTOR = 1.5
+FILLER_MIN_S = 1.5
+FILLER_DEFAULT_S = 2.5
+FILLER_MIN_SAMPLES = 3
+_first_event_s: deque = deque(maxlen=10)
+
+
+def _filler_delay() -> float:
+    if len(_first_event_s) < FILLER_MIN_SAMPLES:
+        return FILLER_DEFAULT_S
+    ordered = sorted(_first_event_s)
+    return max(FILLER_MIN_S, FILLER_FACTOR * ordered[len(ordered) // 2])
 CAPTURE_IDLE_TIMEOUT_S = 8.0  # drop a screen capture if speech was detected but never turned into words
 
 session = Session()
@@ -185,7 +200,8 @@ def _fetch_job(job: _Job, cancel: threading.Event) -> None:
 
 
 def _read_events(events, token: int, cancel: threading.Event, jobs: queue.Queue, result: dict,
-                 timer: Optional[TurnTimer], got_text: threading.Event) -> None:
+                 timer: Optional[TurnTimer], got_text: threading.Event,
+                 latency_from: Optional[float] = None) -> None:
     """Consume Claude's stream: cut it into sentences and start fetching each
     one's audio immediately. Ends the stream early if superseded."""
     splitter = SentenceSplitter()
@@ -200,6 +216,9 @@ def _read_events(events, token: int, cancel: threading.Event, jobs: queue.Queue,
         for kind, payload in events:
             if cancel.is_set() or not _current(token):
                 return
+            if latency_from is not None and kind in ("text", "done"):
+                _first_event_s.append(time.monotonic() - latency_from)  # how long this reply took to show up
+                latency_from = None
             if kind == "text":
                 got_text.set()
                 if timer is not None and "claude_first_token" not in timer.marks:
@@ -235,7 +254,7 @@ def _speak_events(events, token: int, turn: Optional[dict] = None, timer: Option
     (and is discarded) as soon as `token` is superseded.
 
     `filler` (a fillers kind, e.g. "plan"): if Claude's first text hasn't
-    arrived FILLER_DELAY_S after we start, a cached filler line plays first
+    arrived after the adaptive delay (_filler_delay: 1.5x the recent median), a cached filler line plays first
     through the same player; the answer queues behind it. The filler is never
     added to history. It is skipped if its audio isn't cached yet."""
     global _phase, _spoken_text, _spoken_end_at, _last_spoken_is_turn
@@ -243,8 +262,12 @@ def _speak_events(events, token: int, turn: Optional[dict] = None, timer: Option
     jobs: queue.Queue = queue.Queue()
     result: dict = {}
     got_text = threading.Event()
-    reader = threading.Thread(target=_read_events, args=(events, token, cancel, jobs, result, timer, got_text),
-                              daemon=True)
+    started = time.monotonic()
+    reader = threading.Thread(
+        target=_read_events,
+        args=(events, token, cancel, jobs, result, timer, got_text, started if filler is not None else None),
+        daemon=True,
+    )
     reader.start()
 
     def wanted() -> bool:
@@ -255,8 +278,8 @@ def _speak_events(events, token: int, turn: Optional[dict] = None, timer: Option
     starts: deque = deque()  # (byte offset, sentence) not yet heard
     first_audio_marked = timer is None
     committed = False
-    started = time.monotonic()
     filler_pending = filler is not None
+    filler_after = _filler_delay() if filler_pending else 0.0
 
     def start_filler() -> None:
         """Begin the player with a cached filler line (not part of history)."""
@@ -276,7 +299,7 @@ def _speak_events(events, token: int, turn: Optional[dict] = None, timer: Option
         player = audio.PcmPlayer(still_wanted=wanted)
         player.feed(pcm)
         fed += len(pcm)
-        print(f"[Sherpa] Filler: {text}")
+        print(f"[Sherpa] Filler (no reply after {filler_after:.1f}s): {text}")
 
     def tick() -> bool:
         """Housekeeping while we wait: sentences whose audio has begun
@@ -285,7 +308,7 @@ def _speak_events(events, token: int, turn: Optional[dict] = None, timer: Option
         if not wanted():
             return False
         if filler_pending and player is None and not got_text.is_set() \
-                and time.monotonic() - started >= FILLER_DELAY_S:
+                and time.monotonic() - started >= filler_after:
             start_filler()
         if player is None:
             return True
