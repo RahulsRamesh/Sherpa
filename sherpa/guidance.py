@@ -31,7 +31,7 @@ from typing import Callable, Optional
 
 from pynput import mouse
 
-from . import imgdiff, locate
+from . import imgdiff, locate, verify
 from .capture import get_cursor_position, grab_under_cursor
 from .guide import guide
 
@@ -52,7 +52,8 @@ class Step:
     target: str
     say: str
     label: str = ""
-    advance: str = "click"  # "click" | "after_speech"
+    advance: str = "click"  # "click" | "after_speech" | "verify"
+    done_when: str = ""  # for "verify": what the screen looks like once the step is done
 
 
 def parse_steps(raw: list) -> list:
@@ -63,8 +64,10 @@ def parse_steps(raw: list) -> list:
             continue
         say = str(item.get("say", "")).strip() or f"Here's {target}."
         label = str(item.get("label", "")).strip() or target.removeprefix("the ").removeprefix("The ")[:24]
-        advance = "after_speech" if item.get("advance") == "after_speech" else "click"
-        steps.append(Step(target, say, label, advance))
+        advance = item.get("advance")
+        advance = advance if advance in ("after_speech", "verify") else "click"
+        done_when = str(item.get("done_when") or "").strip()
+        steps.append(Step(target, say, label, advance, done_when))
     return steps
 
 
@@ -238,6 +241,15 @@ def run(steps: list, task: str, still_wanted: Callable[[], bool], speak: Callabl
             if step.advance == "after_speech":
                 time.sleep(AFTER_SPEECH_PAUSE_S)
                 continue
+            if step.advance == "verify":
+                result = verify.wait_until_done(step, found, task, still_wanted)
+                if result == "done":
+                    time.sleep(SETTLE_AFTER_CLICK_S)
+                    continue
+                if result == "timeout":
+                    print("[Sherpa] Guide: step never looked done; ending the guide.")
+                    speak("Take your time, tell me when you're ready and I'll keep going.")
+                return
             if not _wait_for_click(step, found, task, clicks, still_wanted):
                 if still_wanted():
                     print("[Sherpa] Guide: no click for a while; leaving the guide.")

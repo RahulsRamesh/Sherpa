@@ -110,8 +110,12 @@ GUIDE_TOOL = {
                         },
                         "advance": {
                             "type": "string",
-                            "enum": ["click", "after_speech"],
-                            "description": "'click' waits for the user to click the target (default); 'after_speech' moves on after speaking, for pointing out something that isn't clicked.",
+                            "enum": ["click", "after_speech", "verify"],
+                            "description": "'click' waits for the user to click the target (default); 'after_speech' moves on after speaking, for pointing out something that isn't clicked; 'verify' = the step is not a click (typing, scrolling, a keyboard shortcut, waiting for something to happen): Sherpa points at the relevant region and watches the screen until the step looks done.",
+                        },
+                        "done_when": {
+                            "type": "string",
+                            "description": "For 'verify' steps: a short plain-language description of what the screen looks like once the step is complete, e.g. 'the name field contains a filename'.",
                         },
                     },
                     "required": ["target", "say"],

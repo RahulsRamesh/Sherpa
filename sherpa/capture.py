@@ -276,3 +276,17 @@ def grab_display_under_cursor(path: Path) -> Tuple[int, Rect]:
     shot, ref = grab_under_cursor()
     shot.save_png(path)
     return ref.index, ref.rect
+
+
+def grab_region(cx: float, cy: float, w: int = 400, h: int = 300) -> Image.Image:
+    """RGB image of a w x h region (global points) centred on (cx, cy), taken
+    from the display containing that point and clamped to it. In memory only."""
+    ref = display_under_cursor(int(cx), int(cy))
+    shot = grab_display(ref, nominal=True)
+    rx, ry, rw, rh = ref.rect
+    sx, sy = shot.width / max(rw, 1), shot.height / max(rh, 1)  # pixels per point
+    w, h = min(w, rw), min(h, rh)
+    left = min(max(cx - rx - w / 2, 0), rw - w)
+    top = min(max(cy - ry - h / 2, 0), rh - h)
+    box = (round(left * sx), round(top * sy), round((left + w) * sx), round((top + h) * sy))
+    return shot.to_pil(None).crop(box).convert("RGB")
