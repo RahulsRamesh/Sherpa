@@ -111,6 +111,15 @@ to the next one. She never clicks for you, and your own mouse is untouched.
 - Try the pieces on their own: `python -m sherpa.guide` (cursor demo),
   `python -m sherpa.accessibility dump`, `python -m sherpa.locate "the File menu"`.
 
+## Timing
+
+After each answer Sherpa prints one line to the terminal, e.g.
+`[Sherpa] Timing: transcribe 0.4s · context 0.3s · Claude 2.9s · TTS first audio 0.4s · heard answer 4.1s after you stopped talking`.
+The clock starts when you stop talking (hotkey: recording ended; voice mode:
+the moment the utterance was recognised as finished). It stays in your
+terminal. Set `SHERPA_TIMING=0` in `.env` to hide it (`SHERPA_DEBUG=1`
+is the separate switch for saving request data).
+
 ## Memory and privacy
 
 Within a session, Sherpa keeps a running conversation (your questions, its
@@ -122,7 +131,8 @@ Nothing is written to disk longer than it needs to be:
   in memory.
 - Each question's audio recording is deleted right after transcription. In
   voice mode audio is streamed and never saved.
-- Each answer's audio is deleted right after it's spoken.
+- Each answer's audio is streamed from ElevenLabs straight to the speakers
+  in memory; it is never written to disk.
 - Screen frames are deleted as soon as they've been read into memory to
   build the annotated images (or immediately if you say nothing). In voice
   mode they're kept until the answer starts playing, in case a follow-up

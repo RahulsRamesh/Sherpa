@@ -44,13 +44,14 @@ def play_listening_cue() -> None:
 
 
 def play_cue(name: str, wait: bool = True) -> None:
+    global _cue_proc
     path = SYSTEM_SOUNDS.get(name)
     if not path:
         return
     if wait:
         subprocess.run(["afplay", path], check=False)
     else:
-        subprocess.Popen(["afplay", path])
+        _cue_proc = subprocess.Popen(["afplay", path])
 
 
 def _rms(frame: np.ndarray) -> float:
@@ -143,29 +144,172 @@ def record_until_silence(on_started: Optional[Callable[[], None]] = None) -> tup
     return out_path, started_at
 
 
+PLAYBACK_RATE = 24000  # matches tts.PCM_FORMAT
+PREBUFFER_S = 0.1  # audio queued before output starts, so tiny network jitter doesn't stutter
+_BYTES_PER_S = PLAYBACK_RATE * 2
+
 _player_lock = threading.Lock()
-_player: Optional[subprocess.Popen] = None
+_current_player: Optional["PcmPlayer"] = None
 
 
-def play_audio_file(path: Path, still_wanted: Callable[[], bool] = lambda: True) -> None:
-    """Play a file and wait for it to finish, unless stop_playback() cuts it off.
+class PcmPlayer:
+    """Plays 24 kHz mono int16 PCM incrementally through a sounddevice stream.
 
-    `still_wanted` is checked under the same lock stop_playback() uses, so a
-    stop that lands just before playback starts can't be missed."""
-    global _player
-    with _player_lock:
-        if not still_wanted():
+    feed() as chunks arrive, finish() when there are no more, then wait().
+    Output starts once ~PREBUFFER_S of audio is queued (or finish() is called),
+    underruns play silence, and stop() silences output immediately.
+    `still_wanted` is polled in the audio callback, feed() and wait(); once it
+    returns False the player stops itself."""
+
+    def __init__(self, still_wanted: Callable[[], bool] = lambda: True):
+        global _current_player
+        self._still_wanted = still_wanted
+        self._lock = threading.Lock()
+        self._buf = bytearray()
+        self._odd = b""
+        self._finished = False
+        self._stopped = False
+        self._playing = False
+        self._stream: Optional[sd.OutputStream] = None
+        self._done = threading.Event()
+        self.started_at: Optional[float] = None  # monotonic time the first audio reached the output
+        with _player_lock:
+            if not still_wanted():
+                self._stopped = True
+                self._done.set()
+            else:
+                _current_player = self
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
+
+    def feed(self, data: bytes) -> None:
+        if self._stopped:
             return
-        proc = subprocess.Popen(["afplay", str(path)])
-        _player = proc
-    proc.wait()
-    with _player_lock:
-        if _player is proc:
-            _player = None
+        if not self._still_wanted():
+            self.stop()
+            return
+        data = self._odd + data
+        if len(data) % 2:
+            data, self._odd = data[:-1], data[-1:]
+        else:
+            self._odd = b""
+        if not data:
+            return
+        with self._lock:
+            self._buf += data
+            ready = len(self._buf) >= PREBUFFER_S * _BYTES_PER_S
+        if ready and self._stream is None:
+            self._open()
+
+    def finish(self) -> None:
+        """No more data: play what's queued, then end."""
+        if self._stopped:
+            return
+        with self._lock:
+            self._finished = True
+            has_data = len(self._buf) > 0
+        if not has_data:
+            self._done.set()
+            self._release()
+        elif self._stream is None:
+            self._open()
+
+    def wait(self) -> None:
+        """Block until everything has played or the player was stopped."""
+        while not self._done.wait(0.02):
+            if not self._still_wanted():
+                self.stop()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stopped = True
+            self._buf.clear()
+        self._done.set()
+        self._release()
+        # The callback now outputs silence, so cleanup can happen off-thread
+        # (closing a PortAudio stream from here can block on its callback).
+        self._close_async()
+
+    def _close_async(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is None:
+            return
+
+        def close() -> None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+        threading.Thread(target=close, daemon=True).start()
+
+    def _release(self) -> None:
+        global _current_player
+        with _player_lock:
+            if _current_player is self:
+                _current_player = None
+
+    def _open(self) -> None:
+        with self._lock:
+            if self._stream is not None or self._stopped:
+                return
+            try:
+                self._stream = sd.OutputStream(
+                    samplerate=PLAYBACK_RATE,
+                    channels=1,
+                    dtype="int16",
+                    latency="low",
+                    callback=self._callback,
+                    finished_callback=self._on_finished,
+                )
+                self._stream.start()
+            except Exception:
+                self._stream = None
+                self._stopped = True
+                self._done.set()
+                raise
+
+    def _on_finished(self) -> None:
+        self._done.set()
+        self._release()
+        self._close_async()
+
+    def _callback(self, outdata, frames, time_info, status) -> None:
+        need = frames * 2
+        with self._lock:
+            if self._stopped:
+                chunk = b""
+            else:
+                chunk = bytes(self._buf[:need])
+                del self._buf[:len(chunk)]
+            drained = self._finished and not self._buf
+        if not self._stopped and not self._still_wanted():
+            self._stopped = True
+            self._done.set()
+            chunk, drained = b"", True
+        out = np.zeros(frames, dtype=np.int16)
+        if chunk:
+            out[: len(chunk) // 2] = np.frombuffer(chunk, dtype=np.int16)
+            if self.started_at is None:
+                # Audible once the device pulls it, plus roughly one buffer of output latency.
+                self.started_at = time.monotonic() + (time_info.outputBufferDacTime - time_info.currentTime
+                                                      if time_info.outputBufferDacTime else 0.0)
+        outdata[:, 0] = out
+        if self._stopped or drained:
+            raise sd.CallbackStop()
+
+
+_cue_proc: Optional[subprocess.Popen] = None
 
 
 def stop_playback() -> None:
-    """Cut off whatever play_audio_file() is currently playing, if anything."""
+    """Silence the answer that is currently playing (and any pending cue)."""
     with _player_lock:
-        if _player is not None and _player.poll() is None:
-            _player.terminate()
+        player = _current_player
+    if player is not None:
+        player.stop()
+    proc = _cue_proc
+    if proc is not None and proc.poll() is None:
+        proc.terminate()

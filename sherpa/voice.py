@@ -36,8 +36,8 @@ BLOCK_MS = 50  # audio chunk size sent to Deepgram
 BLOCK_SAMPLES = SAMPLE_RATE * BLOCK_MS // 1000
 
 DEEPGRAM_WS = "wss://api.deepgram.com/v1/listen"
-ENDPOINTING_MS = 600  # silence that ends an utterance; short, since merging handles false splits
-UTTERANCE_END_MS = 1000  # backup end signal based on word gaps
+ENDPOINTING_MS = 1000  # silence that ends an utterance; 600 cut in on natural pauses mid-thought
+UTTERANCE_END_MS = 1500  # backup end signal based on word gaps; kept above ENDPOINTING_MS (Deepgram's minimum is 1000)
 
 RECONNECT_DELAY_S = 1.0
 

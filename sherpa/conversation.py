@@ -27,6 +27,7 @@ import traceback
 from typing import Optional
 
 from . import audio, debug, guidance, overlay, speechtext, stt, tts
+from .timing import TurnTimer
 from .config import VOICE_BARGE_IN
 from .pointer import PointerTracker
 from .sampler import ScreenSampler
@@ -127,12 +128,17 @@ def _commit_locked(turn: dict) -> None:
     _discard_pending_locked()
 
 
-def _speak(text: str, token: int, turn: Optional[dict] = None) -> None:
-    """Synthesize and play `text`. If `turn` is given, it is committed to
-    history at the moment playback starts (and only if still current)."""
+def _speak(text: str, token: int, turn: Optional[dict] = None, timer: Optional[TurnTimer] = None) -> None:
+    """Stream `text` through TTS into the speakers, starting at the first
+    bytes. If `turn` is given, it is committed to history at the moment
+    playback starts (and only if still current)."""
     global _phase, _spoken_text, _spoken_end_at, _last_spoken_is_turn
-    path = tts.synthesize(text)
+    chunks = tts.stream_pcm(text)
+    player = None
     try:
+        first = next(chunks, None)  # blocks until the first audio bytes arrive
+        if first is None:
+            return
         with _state_lock:
             if token != _token:
                 return
@@ -141,10 +147,33 @@ def _speak(text: str, token: int, turn: Optional[dict] = None) -> None:
             _last_spoken_is_turn = False
             if turn is not None:
                 _commit_locked(turn)
-        audio.play_audio_file(path, still_wanted=lambda: _current(token))
+        player = audio.PcmPlayer(still_wanted=lambda: _current(token))
+        marked = timer is None
+
+        def mark_audio() -> bool:
+            if player.started_at is None:
+                return False
+            timer.mark("tts_first_audio", at=player.started_at)
+            timer.summary()
+            return True
+
+        player.feed(first)
+        for chunk in chunks:
+            if player.stopped:
+                break
+            player.feed(chunk)
+            marked = marked or mark_audio()
+        player.finish()
+        deadline = time.monotonic() + 1.0
+        while not marked and not player.stopped and time.monotonic() < deadline:
+            marked = mark_audio()
+            time.sleep(0.01)
+        player.wait()
     finally:
+        chunks.close()
+        if player is not None:
+            player.stop()  # no-op once drained; frees the stream if we bailed early
         _spoken_end_at = time.monotonic()
-        path.unlink(missing_ok=True)
 
 
 def _guide(token: int, turn: dict, task: str) -> None:
@@ -238,6 +267,7 @@ def handle_question() -> None:
         debug.new_turn()
         debug.save_audio(question_audio)
         window_end = time.monotonic()
+        timer = TurnTimer(window_end)  # the clock starts when recording ended
         trail.stop()
         sampler.stop()  # grabs one last frame in the background while we transcribe
         if not _set_phase(token, "working"):
@@ -255,20 +285,23 @@ def handle_question() -> None:
             audio.play_cue("error")
             return
         print(f"[Sherpa] Question: {question}")
+        timer.mark("stt_done")
 
         keyframes = sampler.finish()
         trace = tracker.since(window_start, window_end)
         ctx = overlay.build_context(keyframes, trace, words, window_start, window_end, audio_t0)
         _log_context(ctx)
+        timer.mark("context_done")
 
         print("[Sherpa] Thinking...")
         answer, turn = session.ask(question, ctx)
+        timer.mark("claude_done")
         if not _current(token):
             print("[Sherpa] (Superseded while thinking — answer discarded.)")
             return
         print(f"[Sherpa] Answer: {answer}")
 
-        _speak(answer, token, turn)
+        _speak(answer, token, turn, timer)
         _guide(token, turn, question)
 
     except Exception:
@@ -467,6 +500,12 @@ def _process_pending(token: int, snapshot: list) -> None:
     """Answer everything pending as one message. If a newer utterance arrives
     first, this is superseded and the newer call redoes it with both."""
     try:
+        last = snapshot[-1]
+        # Clock starts when the last utterance's final word ended; the gap to
+        # heard_at (endpointing wait) shows up as the "transcribe" stage.
+        t0 = last.t_end if last.t_end <= last.heard_at else last.heard_at
+        timer = TurnTimer(t0)
+        timer.mark("stt_done", at=last.heard_at)
         frames: list = []
         for u in snapshot:
             if u.keyframes is None:
@@ -489,16 +528,18 @@ def _process_pending(token: int, snapshot: list) -> None:
         trace = tracker.since(w_start, w_end)
         ctx = overlay.build_context(frames, trace, words, w_start, w_end, 0.0, consume=False)
         _log_context(ctx)
+        timer.mark("context_done")
 
         debug.new_turn()
         print(f"[Sherpa] Question: {question}")
         print("[Sherpa] Thinking...")
         answer, turn = session.ask(question, ctx)
+        timer.mark("claude_done")
         if not _current(token):
             print("[Sherpa] (Superseded while thinking — a newer message will be answered instead.)")
             return
         print(f"[Sherpa] Answer: {answer}")
-        _speak(answer, token, turn)
+        _speak(answer, token, turn, timer)
         _guide(token, turn, question)
     except Exception:
         if _current(token):

@@ -32,6 +32,9 @@ VOICE_BARGE_IN = os.environ.get("SHERPA_BARGE_IN", "1").lower() not in ("0", "fa
 
 DEBUG = os.environ.get("SHERPA_DEBUG", "").lower() in ("1", "true", "yes")
 
+# Print a one-line per-turn latency breakdown (terminal only). Set SHERPA_TIMING=0 to hide.
+TIMING = os.environ.get("SHERPA_TIMING", "1").lower() not in ("0", "false", "no")
+
 TMP_DIR = Path(__file__).parent / "_tmp"
 DEBUG_DIR = Path(__file__).parent / "_debug"
 TMP_DIR.mkdir(exist_ok=True)
