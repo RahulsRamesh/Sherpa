@@ -8,7 +8,7 @@ import requests
 from .config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
 
 ELEVENLABS_STREAM_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
-MODEL_ID = "eleven_turbo_v2_5"  # optimized for low latency
+MODEL_ID = "eleven_v4_turbo"  # v4 pronunciation (reads math well), lower latency
 PCM_FORMAT = "pcm_24000"  # raw signed 16-bit little-endian mono, 24 kHz
 SAMPLE_RATE = 24000
 CHUNK_BYTES = 4096
