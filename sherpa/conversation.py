@@ -46,7 +46,7 @@ import traceback
 from collections import deque
 from typing import Optional
 
-from . import audio, corrections, debug, guidance, overlay, speechtext, stt, tts
+from . import audio, corrections, debug, fillers, guidance, overlay, speechtext, stt, tts
 from .timing import TurnTimer
 from .config import VOICE_BARGE_IN
 from .pointer import PointerTracker
@@ -61,6 +61,7 @@ MAX_MERGED_FRAMES = 8  # cap on screen frames sent when several utterances are m
 BARGE_IN_MIN_WORDS = 2  # words heard over Sherpa before she stops talking
 ECHO_OVERLAP = 0.6  # fraction of heard words found in what she's saying => it's her own voice
 ECHO_TAIL_S = 2.5  # keep guarding this long after she stops (room echo, late transcripts)
+FILLER_DELAY_S = 0.6  # play a "plan" filler if Claude's first text hasn't arrived by then
 CAPTURE_IDLE_TIMEOUT_S = 8.0  # drop a screen capture if speech was detected but never turned into words
 
 session = Session()
@@ -184,7 +185,7 @@ def _fetch_job(job: _Job, cancel: threading.Event) -> None:
 
 
 def _read_events(events, token: int, cancel: threading.Event, jobs: queue.Queue, result: dict,
-                 timer: Optional[TurnTimer]) -> None:
+                 timer: Optional[TurnTimer], got_text: threading.Event) -> None:
     """Consume Claude's stream: cut it into sentences and start fetching each
     one's audio immediately. Ends the stream early if superseded."""
     splitter = SentenceSplitter()
@@ -200,6 +201,7 @@ def _read_events(events, token: int, cancel: threading.Event, jobs: queue.Queue,
             if cancel.is_set() or not _current(token):
                 return
             if kind == "text":
+                got_text.set()
                 if timer is not None and "claude_first_token" not in timer.marks:
                     timer.mark("claude_first_token")
                 submit(splitter.feed(payload))
@@ -220,7 +222,8 @@ def _read_events(events, token: int, cancel: threading.Event, jobs: queue.Queue,
         jobs.put(None)  # no more sentences
 
 
-def _speak_events(events, token: int, turn: Optional[dict] = None, timer: Optional[TurnTimer] = None) -> dict:
+def _speak_events(events, token: int, turn: Optional[dict] = None, timer: Optional[TurnTimer] = None,
+                  filler: Optional[str] = None) -> dict:
     """Speak a text stream as it arrives (events as from brain.stream_answer),
     one sentence at a time with no gap: later sentences are fetched while
     earlier ones play, all fed into one PcmPlayer. Audio starts at the first
@@ -229,12 +232,19 @@ def _speak_events(events, token: int, turn: Optional[dict] = None, timer: Option
     If `turn` is given it is committed to history when the first sentence
     starts playing, and each sentence is added to turn["answer"] as it starts
     playing, so history holds exactly what the user heard. Everything stops
-    (and is discarded) as soon as `token` is superseded."""
+    (and is discarded) as soon as `token` is superseded.
+
+    `filler` (a fillers kind, e.g. "plan"): if Claude's first text hasn't
+    arrived FILLER_DELAY_S after we start, a cached filler line plays first
+    through the same player; the answer queues behind it. The filler is never
+    added to history. It is skipped if its audio isn't cached yet."""
     global _phase, _spoken_text, _spoken_end_at, _last_spoken_is_turn
     cancel = threading.Event()
     jobs: queue.Queue = queue.Queue()
     result: dict = {}
-    reader = threading.Thread(target=_read_events, args=(events, token, cancel, jobs, result, timer), daemon=True)
+    got_text = threading.Event()
+    reader = threading.Thread(target=_read_events, args=(events, token, cancel, jobs, result, timer, got_text),
+                              daemon=True)
     reader.start()
 
     def wanted() -> bool:
@@ -245,6 +255,28 @@ def _speak_events(events, token: int, turn: Optional[dict] = None, timer: Option
     starts: deque = deque()  # (byte offset, sentence) not yet heard
     first_audio_marked = timer is None
     committed = False
+    started = time.monotonic()
+    filler_pending = filler is not None
+
+    def start_filler() -> None:
+        """Begin the player with a cached filler line (not part of history)."""
+        nonlocal player, fed, filler_pending
+        global _phase, _spoken_text, _last_spoken_is_turn
+        filler_pending = False
+        text = fillers.pick(filler)
+        pcm = fillers.peek_pcm(text)
+        if pcm is None:
+            return
+        with _state_lock:
+            if token != _token:
+                return
+            _phase = "speaking"
+            _spoken_text = text  # echo guard
+            _last_spoken_is_turn = False  # nothing committed: an interrupt notes nothing
+        player = audio.PcmPlayer(still_wanted=wanted)
+        player.feed(pcm)
+        fed += len(pcm)
+        print(f"[Sherpa] Filler: {text}")
 
     def tick() -> bool:
         """Housekeeping while we wait: sentences whose audio has begun
@@ -252,6 +284,9 @@ def _speak_events(events, token: int, turn: Optional[dict] = None, timer: Option
         nonlocal first_audio_marked, committed
         if not wanted():
             return False
+        if filler_pending and player is None and not got_text.is_set() \
+                and time.monotonic() - started >= FILLER_DELAY_S:
+            start_filler()
         if player is None:
             return True
         if not first_audio_marked and player.started_at is not None:
@@ -360,7 +395,10 @@ def _guide(token: int, turn: dict, task: str) -> None:
         _speak(text, token)
         _set_phase(token, "guiding")  # _speak leaves the phase as "speaking"
 
-    guidance.run(steps, task, still_wanted=lambda: _current(token), speak=speak)
+    def filler(kind: str) -> None:
+        speak(fillers.pick(kind))  # same machinery: interruptible, not in history, phase restored
+
+    guidance.run(steps, task, still_wanted=lambda: _current(token), speak=speak, filler=filler)
 
 
 def _can_correct() -> bool:
@@ -505,7 +543,7 @@ def handle_question() -> None:
 
         print("[Sherpa] Thinking...")
         events, turn = session.ask_stream(question, ctx)
-        _speak_events(events, token, turn, timer)  # speaks as the answer streams in
+        _speak_events(events, token, turn, timer, filler="plan")  # speaks as the answer streams in
         _guide(token, turn, question)
 
     except Exception:
@@ -739,7 +777,7 @@ def _process_pending(token: int, snapshot: list) -> None:
         print(f"[Sherpa] Question: {question}")
         print("[Sherpa] Thinking...")
         events, turn = session.ask_stream(question, ctx)
-        _speak_events(events, token, turn, timer)  # speaks as the answer streams in
+        _speak_events(events, token, turn, timer, filler="plan")  # speaks as the answer streams in
         _guide(token, turn, question)
     except Exception:
         if _current(token):

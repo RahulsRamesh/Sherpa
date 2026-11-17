@@ -102,6 +102,7 @@ def main() -> None:
     check_config()
     _sweep_tmp_dir()
     convo.tracker.start()
+    convo.fillers.warm()  # pre-synthesize filler lines in the background
     print(
         "Sherpa is running.\n"
         "  Double-tap Right Option  -> start a session\n"
