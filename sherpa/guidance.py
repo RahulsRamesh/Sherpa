@@ -9,7 +9,7 @@ somewhere else, the target is looked up again in case the screen changed and
 the cursor follows it.
 
 It never clicks for the user. It stops when the steps run out, when a target
-can't be found (she says so instead of pointing at a guess), when the user goes
+can't be found twice (she asks the user to go back a step once, and never points at a guess), when the user goes
 quiet for IDLE_TIMEOUT_S, or when `still_wanted()` turns false because the user
 interrupted or asked something new.
 
@@ -171,7 +171,52 @@ class _Prefetch:
         return now is not None and self.thumb is not None and imgdiff.changed_fraction(self.thumb, now) < UNCHANGED_FRACTION
 
 
-def _wait_for_click(step: Step, found: locate.Located, task: str, clicks, still_wanted) -> bool:
+def _natural(target: str) -> str:
+    """A target phrased for speech: trimmed, no trailing period, leading 'The' lowercased."""
+    t = target.strip().rstrip(".")
+    return "the " + t[4:] if t.startswith("The ") else t
+
+
+def _not_found(steps: list, i: int, task: str, still_wanted, speak, clicks) -> Optional[locate.Located]:
+    """Handle steps[i] not being found. Returns a fresh Located if a retry succeeds,
+    else None (the guide should end). One retry per step, only if a step came before."""
+    target = _natural(steps[i].target)
+    fallback = f"I couldn't find {target}, but if you can find it for me, give me a shout and I'll show you from there."
+    if i == 0:
+        print(f"[Sherpa] Guide: couldn't find {steps[i].target!r} at the first step; ending.")
+        speak(fallback)
+        return None
+    prev = steps[i - 1]
+    print(f"[Sherpa] Guide: couldn't find {steps[i].target!r}; asking the user to go back to {prev.target!r}.")
+    back = _find(prev, task)
+    if back is not None and still_wanted():
+        guide.move_to(back.x, back.y, label=prev.label)
+    if not still_wanted():
+        return None
+    speak(f"Hmm, I don't see {target}. Can you go back to {_natural(prev.target)} and we'll take another look?")
+    clicks.clear()
+    deadline = time.monotonic() + IDLE_TIMEOUT_S
+    acted = False
+    while still_wanted() and time.monotonic() < deadline:
+        if clicks.wait(0.25) is not None:
+            acted = True
+            break
+    if not acted:
+        if still_wanted():
+            print("[Sherpa] Guide: no click for a while; leaving the guide.")
+        return None
+    time.sleep(SETTLE_AFTER_CLICK_S)
+    if not still_wanted():
+        return None
+    print(f"[Sherpa] Guide: looking again for {steps[i].target!r}")
+    again = _find(steps[i], task)
+    if again is None and still_wanted():
+        print(f"[Sherpa] Guide: still can't find {steps[i].target!r}; ending.")
+        speak(fallback)
+    return again
+
+
+def _wait_for_click(step: Step, found: locate.Located, task: str, clicks, still_wanted, filler=None) -> bool:
     """True once the user clicks the target. False on timeout or interruption."""
     deadline = time.monotonic() + IDLE_TIMEOUT_S
     while still_wanted() and time.monotonic() < deadline:
@@ -185,6 +230,8 @@ def _wait_for_click(step: Step, found: locate.Located, task: str, clicks, still_
         time.sleep(RELOOK_DELAY_S)
         if not still_wanted():
             return False
+        if filler is not None:
+            filler("recheck")
         again = _find(step, task)
         if again is not None and math.hypot(again.x - found.x, again.y - found.y) >= MOVED_PX:
             print(f"[Sherpa] Guide: '{step.target}' is somewhere else now; following it.")
@@ -193,7 +240,8 @@ def _wait_for_click(step: Step, found: locate.Located, task: str, clicks, still_
     return False
 
 
-def run(steps: list, task: str, still_wanted: Callable[[], bool], speak: Callable[[str], None], clicks=None) -> None:
+def run(steps: list, task: str, still_wanted: Callable[[], bool], speak: Callable[[str], None], clicks=None,
+        filler: Optional[Callable[[str], None]] = None) -> None:
     """Point through `steps`. `speak(text)` blocks while she talks. `clicks` is
     injectable for tests."""
     if not steps:
@@ -225,8 +273,9 @@ def run(steps: list, task: str, still_wanted: Callable[[], bool], speak: Callabl
             if not still_wanted():
                 return
             if found is None:
-                speak(f"I can't find {step.target} on your screen.")
-                return
+                found = _not_found(steps, i, task, still_wanted, speak, clicks)
+                if found is None:
+                    return
             print(f"[Sherpa] Guide: pointing at {found.label or step.target!r} ({found.how}) at ({found.x:.0f}, {found.y:.0f})")
             clicks.clear()
             guide.move_to(found.x, found.y, label=step.label)
@@ -238,7 +287,7 @@ def run(steps: list, task: str, still_wanted: Callable[[], bool], speak: Callabl
             if step.advance == "after_speech":
                 time.sleep(AFTER_SPEECH_PAUSE_S)
                 continue
-            if not _wait_for_click(step, found, task, clicks, still_wanted):
+            if not _wait_for_click(step, found, task, clicks, still_wanted, filler):
                 if still_wanted():
                     print("[Sherpa] Guide: no click for a while; leaving the guide.")
                 return
