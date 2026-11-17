@@ -3,6 +3,7 @@
 import base64
 import io
 import json
+import os
 import re
 
 from anthropic import Anthropic
@@ -12,6 +13,9 @@ from . import debug
 from .config import ANTHROPIC_API_KEY
 
 MODEL = "claude-sonnet-5"
+# Cheap, fast model for small structured lookups (where is X on screen). Set
+# SHERPA_LOOKUP_MODEL=claude-sonnet-5 to flip back to the main model.
+LOOKUP_MODEL = os.environ.get("SHERPA_LOOKUP_MODEL") or "claude-haiku-5-5"
 MAX_DIMENSION = 1568  # Anthropic's recommended cap for image longest side
 # Sonnet 5 thinks by default, and thinking tokens count against max_tokens.
 # At 1500, a hard question could spend the whole budget thinking and return
@@ -160,22 +164,76 @@ def get_answer(messages: list) -> tuple:
     return text, steps
 
 
-def ask_json(system: str, content: list, max_tokens: int = 4000) -> dict:
+LEAD_IN = "Sure, I'll walk you through it."
+
+
+def stream_answer(messages: list):
+    """Like get_answer, but yields events as the reply arrives so it can be
+    spoken while it is still being written:
+      ("text", delta)  for each piece of reply text, then once at the end
+      ("done", {"text", "steps", "stop_reason"})  with the complete result.
+    A reply with steps but no text gets the LEAD_IN as a text event; no text
+    and no steps raises. Closing the generator closes the HTTP stream."""
+    debug.save_request(SYSTEM_PROMPT, messages)
+    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    streamed: list = []
+    with client.messages.stream(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        output_config={"effort": EFFORT},
+        system=SYSTEM_PROMPT,
+        messages=messages,
+        tools=[GUIDE_TOOL],
+    ) as stream:
+        for delta in stream.text_stream:
+            if delta:
+                streamed.append(delta)
+                yield ("text", delta)
+        message = stream.get_final_message()
+
+    steps: list = []
+    for block in message.content:
+        if block.type == "tool_use" and block.name == "guide_steps":
+            steps = list((block.input or {}).get("steps") or [])
+    text = "".join(streamed).strip()
+    # Same protection as get_answer: an empty answer must never reach history.
+    if not text and steps:
+        text = LEAD_IN
+        yield ("text", text)
+    if not text:
+        raise RuntimeError(f"Claude returned no text (stop_reason={message.stop_reason})")
+    debug.save_answer(text if not steps else text + "\n[guide_steps] " + json.dumps(steps))
+    yield ("done", {"text": text, "steps": steps, "stop_reason": message.stop_reason})
+
+
+def ask_json(system: str, content: list, max_tokens: int = 4000, model: str = "") -> dict:
     """One-off structured question (not part of the spoken conversation): the
     reply must contain a JSON object, which is parsed and returned."""
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
     message = client.messages.create(
-        model=MODEL,
+        model=model or MODEL,
         max_tokens=max_tokens,
         output_config={"effort": EFFORT},
         system=system,
         messages=[{"role": "user", "content": content}],
     )
     text = " ".join(b.text for b in message.content if b.type == "text")
-    found = re.search(r"\{.*\}", text, re.S)
-    if not found:
+    # Smaller models sometimes talk first ("shows '{ } Python' at...") and then
+    # give the JSON, so take the last object that parses rather than the span
+    # from the first brace to the last.
+    decoder, found, end = json.JSONDecoder(), None, 0
+    for m in re.finditer(r"\{", text):
+        if m.start() < end:
+            continue  # inside an object already taken
+        try:
+            obj, end = decoder.raw_decode(text, m.start())
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj:
+            found = obj
+    if found is None:
         raise RuntimeError(f"Claude returned no JSON (stop_reason={message.stop_reason}): {text[:200]!r}")
-    return json.loads(found.group(0))
+    return found
 
 
 def image_block(img: Image.Image) -> dict:

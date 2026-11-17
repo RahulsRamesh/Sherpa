@@ -13,6 +13,10 @@ where anyone expected is simply found where it is. Three tiers, cheapest first:
    cursor goes there first and Claude checks a zoomed crop where her own cursor
    is visible, nudging it onto the target if it's off.
 
+Both Claude calls use brain.LOOKUP_MODEL (Haiku by default; set the
+SHERPA_LOOKUP_MODEL env var to override), which matched Sonnet's accuracy on
+these small screen lookups at about 60% of the latency.
+
 If nothing is found, `locate` returns None and the caller should say so
 rather than point somewhere arbitrary.
 
@@ -147,7 +151,7 @@ def _ask_claude(query: str, context: str, elements: list, matches: list) -> Opti
         f"The screenshot is {shown.size[0]}x{shown.size[1]} pixels."
     )
     try:
-        reply = brain.ask_json(_CHOOSE_SYSTEM, [brain.image_block(shown), {"type": "text", "text": prompt}])
+        reply = brain.ask_json(_CHOOSE_SYSTEM, [brain.image_block(shown), {"type": "text", "text": prompt}], model=brain.LOOKUP_MODEL)
     except Exception as e:
         print(f"[Sherpa] Couldn't ask Claude where '{query}' is: {type(e).__name__}: {e}")
         return None
@@ -192,7 +196,7 @@ def refine(query: str, at: Located, guide) -> Located:
         tip = ((cx_pt - left) * k, (cy_pt - top) * k)
         prompt = f"Find: {query}\nThe arrow tip is at pixel ({tip[0]:.0f}, {tip[1]:.0f}). The crop is {crop.size[0]}x{crop.size[1]} pixels."
         try:
-            reply = brain.ask_json(_REFINE_SYSTEM, [brain.image_block(crop), {"type": "text", "text": prompt}])
+            reply = brain.ask_json(_REFINE_SYSTEM, [brain.image_block(crop), {"type": "text", "text": prompt}], model=brain.LOOKUP_MODEL)
         except Exception as e:
             print(f"[Sherpa] Refinement check failed ({type(e).__name__}); keeping the current position.")
             return cur

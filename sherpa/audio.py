@@ -173,6 +173,8 @@ class PcmPlayer:
         self._stream: Optional[sd.OutputStream] = None
         self._done = threading.Event()
         self.started_at: Optional[float] = None  # monotonic time the first audio reached the output
+        self.consumed = 0  # bytes handed to the output so far (how far playback has got)
+        self.underruns = 0  # callbacks that had to pad with silence mid-answer
         with _player_lock:
             if not still_wanted():
                 self._stopped = True
@@ -183,6 +185,11 @@ class PcmPlayer:
     @property
     def stopped(self) -> bool:
         return self._stopped
+
+    @property
+    def done(self) -> bool:
+        """Everything played, or stopped."""
+        return self._done.is_set()
 
     def feed(self, data: bytes) -> None:
         if self._stopped:
@@ -284,6 +291,9 @@ class PcmPlayer:
             else:
                 chunk = bytes(self._buf[:need])
                 del self._buf[:len(chunk)]
+                self.consumed += len(chunk)
+                if len(chunk) < need and not self._finished and self.started_at is not None:
+                    self.underruns += 1
             drained = self._finished and not self._buf
         if not self._stopped and not self._still_wanted():
             self._stopped = True

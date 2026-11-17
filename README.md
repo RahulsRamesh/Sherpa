@@ -39,7 +39,9 @@ that one" / "try that again" style questions.
 4. Claude receives the frames with your pointer trail drawn on them (blue =
    earlier, red = later, numbered marks where you circled or hovered) and a
    text timeline of speech against pointer movement. The answer is spoken
-   back (ElevenLabs).
+   back (ElevenLabs) as it streams in: Sherpa starts talking as soon as the
+   first sentence is written, while the rest is still being generated and
+   voiced, instead of waiting for the whole reply.
 
 While Sherpa is listening you also see your own cursor trail on screen,
 fading out about 1.5 seconds after you draw it. That overlay is for you
@@ -51,8 +53,9 @@ annotated path described above.
 Shift + Right Option while she's thinking or talking cuts her off and
 starts listening for a new question. A single tap of Right Option just
 stops her. An answer you interrupt *before it was spoken* is discarded and
-isn't remembered; one you interrupt mid-speech is kept, since you heard
-part of it. (Requests already sent to Deepgram/Claude can't be recalled, but
+isn't remembered; one you interrupt mid-speech is kept, but only the
+sentences she had started saying (plus a note that you cut her off): the
+conversation history holds what you heard, never what was still queued. (Requests already sent to Deepgram/Claude can't be recalled, but
 their results are thrown away.)
 
 If it doesn't hear anything within 6 seconds, or something errors out,
@@ -72,7 +75,8 @@ anything per question.
   both parts go to Claude as *one* message, with the combined pointer and
   screen context. Messages waiting for an answer are kept apart from the
   conversation history, which only ever gets an answer once Sherpa starts
-  speaking it, so nothing is ever recorded twice.
+  speaking it (and then only the sentences actually spoken), so nothing is
+  ever recorded twice.
 - **Barge-in.** Talk over Sherpa and she stops. Your words become the next
   message, and the model is told its previous answer was cut off.
 - **Hearing herself.** There's no acoustic echo cancellation yet. Instead,
@@ -114,7 +118,8 @@ to the next one. She never clicks for you, and your own mouse is untouched.
 ## Timing
 
 After each answer Sherpa prints one line to the terminal, e.g.
-`[Sherpa] Timing: transcribe 0.4s · context 0.3s · Claude 2.9s · TTS first audio 0.4s · heard answer 4.1s after you stopped talking`.
+`[Sherpa] Timing: transcribe 0.4s · context 0.3s · Claude first token 1.3s, done 2.9s · first sentence + TTS first audio +0.9s · heard answer 2.6s after you stopped talking`.
+Claude's "done" overlaps with speech: the answer is voiced while it streams.
 The clock starts when you stop talking (hotkey: recording ended; voice mode:
 the moment the utterance was recognised as finished). It stays in your
 terminal. Set `SHERPA_TIMING=0` in `.env` to hide it (`SHERPA_DEBUG=1`

@@ -6,13 +6,24 @@ older token is superseded: it stops speaking and its results are thrown away
 dropped). Phases: idle | listening (hotkey recording) | working | speaking | guiding
 (pointing the user through steps with her own cursor).
 
-History and merging. The session's history only ever holds answers the user
-actually started hearing. Messages that are still awaiting an answer live in
-`_pending`, separate from history. If a new utterance arrives while an earlier
-one is still unanswered, the earlier request is cancelled and the new message
-is sent as ONE turn built from everything pending; that turn is committed to
-history once, when its answer begins playing. Nothing is ever in both places,
-so there is nothing to de-duplicate.
+History and merging. The session's history only ever holds what the user
+actually heard. Messages that are still awaiting an answer live in `_pending`,
+separate from history. If a new utterance arrives while an earlier one is still
+unanswered, the earlier request is cancelled and the new message is sent as ONE
+turn built from everything pending; that turn is committed to history once,
+when its FIRST sentence starts playing (the committed answer is then empty and
+grows). Nothing is ever in both places, so there is nothing to de-duplicate.
+
+Streaming. The answer is spoken as Claude writes it (_speak_events): a reader
+thread cuts the text stream into sentences (sentences.py) and starts each
+sentence's TTS fetch immediately; the speaking thread feeds the sentences, in
+order, into ONE PcmPlayer, so a later sentence is already buffered while an
+earlier one plays. Each sentence is appended to turn["answer"] (under
+_state_lock, only if still current) when the player's output position passes
+its first byte, so on an interrupt the stored answer is exactly the sentences
+that had begun playing, plus INTERRUPTED_NOTE (session.note_interrupted); the
+rest is dropped. The guide-steps suffix is added only once everything was
+spoken. Superseding stops the player, the fetch threads and the Claude stream.
 
 Voice mode. A toggle turns on continuous listening (voice.py). Each finished
 utterance goes through the same pending/merge path. Talking over Sherpa stops
@@ -20,10 +31,12 @@ her (barge-in), with a guard that ignores her own voice coming back through
 the mic.
 """
 
+import queue
 import re
 import threading
 import time
 import traceback
+from collections import deque
 from typing import Optional
 
 from . import audio, debug, guidance, overlay, speechtext, stt, tts
@@ -31,10 +44,12 @@ from .timing import TurnTimer
 from .config import VOICE_BARGE_IN
 from .pointer import PointerTracker
 from .sampler import ScreenSampler
+from .sentences import SentenceSplitter
 from .session import Session
 from .trail import TrailOverlay
 from .voice import Utterance, VoiceStream
 
+MAX_PARALLEL_TTS = 2  # sentences whose audio is fetched at the same time
 MAX_MERGED_FRAMES = 8  # cap on screen frames sent when several utterances are merged
 BARGE_IN_MIN_WORDS = 2  # words heard over Sherpa before she stops talking
 ECHO_OVERLAP = 0.6  # fraction of heard words found in what she's saying => it's her own voice
@@ -128,57 +143,208 @@ def _commit_locked(turn: dict) -> None:
     _discard_pending_locked()
 
 
-def _speak(text: str, token: int, turn: Optional[dict] = None, timer: Optional[TurnTimer] = None) -> None:
-    """Stream `text` through TTS into the speakers, starting at the first
-    bytes. If `turn` is given, it is committed to history at the moment
-    playback starts (and only if still current)."""
-    global _phase, _spoken_text, _spoken_end_at, _last_spoken_is_turn
-    chunks = tts.stream_pcm(text)
-    player = None
+class _Job:
+    """One sentence on its way to the speakers: a fetch thread fills `chunks`
+    with PCM, then None (end), or an Exception."""
+
+    def __init__(self, text: str):
+        self.text = text
+        self.chunks: queue.Queue = queue.Queue()
+
+
+_tts_slots = threading.Semaphore(MAX_PARALLEL_TTS)  # ElevenLabs limits concurrent requests
+
+
+def _fetch_job(job: _Job, cancel: threading.Event) -> None:
+    """Fetch one sentence's audio (started the moment the sentence exists, so
+    it is already buffered by the time the previous sentence finishes)."""
+    chunks = None
     try:
-        first = next(chunks, None)  # blocks until the first audio bytes arrive
-        if first is None:
-            return
-        with _state_lock:
-            if token != _token:
+        with _tts_slots:
+            if cancel.is_set():
                 return
-            _phase = "speaking"
-            _spoken_text = text
-            _last_spoken_is_turn = False
-            if turn is not None:
-                _commit_locked(turn)
-        player = audio.PcmPlayer(still_wanted=lambda: _current(token))
-        marked = timer is None
-
-        def mark_audio() -> bool:
-            if player.started_at is None:
-                return False
-            timer.mark("tts_first_audio", at=player.started_at)
-            timer.summary()
-            return True
-
-        player.feed(first)
-        for chunk in chunks:
-            if player.stopped:
-                break
-            player.feed(chunk)
-            marked = marked or mark_audio()
-        player.finish()
-        deadline = time.monotonic() + 1.0
-        while not marked and not player.stopped and time.monotonic() < deadline:
-            marked = mark_audio()
-            time.sleep(0.01)
-        player.wait()
+            chunks = tts.stream_pcm(job.text)
+            for chunk in chunks:
+                if cancel.is_set():
+                    return
+                job.chunks.put(chunk)
+        job.chunks.put(None)
+    except Exception as e:
+        job.chunks.put(e)
     finally:
-        chunks.close()
+        if chunks is not None:
+            chunks.close()
+
+
+def _read_events(events, token: int, cancel: threading.Event, jobs: queue.Queue, result: dict,
+                 timer: Optional[TurnTimer]) -> None:
+    """Consume Claude's stream: cut it into sentences and start fetching each
+    one's audio immediately. Ends the stream early if superseded."""
+    splitter = SentenceSplitter()
+
+    def submit(sentences) -> None:
+        for sentence in sentences:
+            job = _Job(sentence)
+            threading.Thread(target=_fetch_job, args=(job, cancel), daemon=True).start()
+            jobs.put(job)
+
+    try:
+        for kind, payload in events:
+            if cancel.is_set() or not _current(token):
+                return
+            if kind == "text":
+                if timer is not None and "claude_first_token" not in timer.marks:
+                    timer.mark("claude_first_token")
+                submit(splitter.feed(payload))
+            elif kind == "done":
+                result.update(payload)
+                if timer is not None:
+                    timer.mark("claude_done")
+                print(f"[Sherpa] Answer: {payload['text']}")
+        if not cancel.is_set() and _current(token):
+            submit(splitter.flush())
+    except Exception as e:
+        result["error"] = e
+    finally:
+        try:
+            events.close()
+        except Exception:
+            pass
+        jobs.put(None)  # no more sentences
+
+
+def _speak_events(events, token: int, turn: Optional[dict] = None, timer: Optional[TurnTimer] = None) -> dict:
+    """Speak a text stream as it arrives (events as from brain.stream_answer),
+    one sentence at a time with no gap: later sentences are fetched while
+    earlier ones play, all fed into one PcmPlayer. Audio starts at the first
+    bytes of the first sentence. Returns the stream's final result dict.
+
+    If `turn` is given it is committed to history when the first sentence
+    starts playing, and each sentence is added to turn["answer"] as it starts
+    playing, so history holds exactly what the user heard. Everything stops
+    (and is discarded) as soon as `token` is superseded."""
+    global _phase, _spoken_text, _spoken_end_at, _last_spoken_is_turn
+    cancel = threading.Event()
+    jobs: queue.Queue = queue.Queue()
+    result: dict = {}
+    reader = threading.Thread(target=_read_events, args=(events, token, cancel, jobs, result, timer), daemon=True)
+    reader.start()
+
+    def wanted() -> bool:
+        return not cancel.is_set() and _current(token)
+
+    player = None
+    fed = 0  # bytes given to the player so far
+    starts: deque = deque()  # (byte offset, sentence) not yet heard
+    first_audio_marked = timer is None
+    committed = False
+
+    def tick() -> bool:
+        """Housekeeping while we wait: sentences whose audio has begun
+        playing become part of the heard answer. False once superseded."""
+        nonlocal first_audio_marked, committed
+        if not wanted():
+            return False
+        if player is None:
+            return True
+        if not first_audio_marked and player.started_at is not None:
+            timer.mark("tts_first_audio", at=player.started_at)
+            first_audio_marked = True
+        if first_audio_marked and timer is not None and "claude_done" in timer.marks:
+            timer.summary()
+        consumed = player.consumed
+        while starts and starts[0][0] < consumed:
+            _, sentence = starts.popleft()
+            if turn is None:
+                continue
+            with _state_lock:
+                if token != _token:
+                    return False
+                if not committed:
+                    committed = True
+                    _commit_locked(turn)
+                session.add_spoken(turn, sentence)
+        return True
+
+    def take(q: queue.Queue):
+        """Next item from q, ticking while we wait; None if superseded."""
+        while True:
+            try:
+                return q.get(timeout=0.02)
+            except queue.Empty:
+                if not tick():
+                    return _STOP
+
+    try:
+        while True:
+            job = take(jobs)
+            if job is _STOP:
+                return result
+            if job is None:
+                break
+            first_of_job = True
+            while True:
+                chunk = take(job.chunks)
+                if chunk is _STOP:
+                    return result
+                if chunk is None:
+                    break
+                if isinstance(chunk, Exception):
+                    raise chunk
+                if player is None:
+                    with _state_lock:  # first audio bytes are in hand
+                        if token != _token:
+                            return result
+                        _phase = "speaking"
+                        _spoken_text = ""
+                        _last_spoken_is_turn = False
+                    player = audio.PcmPlayer(still_wanted=wanted)
+                if first_of_job:
+                    first_of_job = False
+                    starts.append((fed, job.text))
+                    _spoken_text = f"{_spoken_text} {job.text}".strip()  # echo guard: what she is saying now
+                player.feed(chunk)
+                fed += len(chunk)
+                if player.stopped:
+                    return result
         if player is not None:
-            player.stop()  # no-op once drained; frees the stream if we bailed early
+            player.finish()
+            while not player.done:
+                time.sleep(0.02)
+                if not tick():
+                    return result
+            tick()  # the last sentences began playing within the final ticks
+        if wanted() and turn is not None and committed and "steps" in result:
+            with _state_lock:
+                if token == _token:
+                    session.finish_turn(turn, result["steps"])
+        if "error" in result:
+            raise result["error"]
+        return result
+    finally:
+        cancel.set()  # fetch threads and the Claude stream wind down
+        if player is not None:
+            player.stop()  # no-op once drained; silences it if we bailed early
         _spoken_end_at = time.monotonic()
+        if timer is not None:
+            timer.summary()
+
+
+_STOP = object()
+
+
+def _speak(text: str, token: int) -> None:
+    """Speak a fixed line (greeting, guide steps) through the same machinery."""
+    _speak_events(iter([("text", text)]), token)
 
 
 def _guide(token: int, turn: dict, task: str) -> None:
     """If the answer came with steps, point the user through them. Ends when
     done, or as soon as this token is superseded (interrupt, new question)."""
+    # TODO(streaming): the guide_steps tool call only arrives after the spoken
+    # text is complete, so step 1 starts after the lead-in. To start earlier,
+    # parse the partial tool JSON (input_json deltas) and begin step 1 as soon as
+    # its first step object is complete, while the lead-in is still playing.
     steps = guidance.parse_steps(turn.get("steps"))
     if not steps or not _set_phase(token, "guiding"):
         return
@@ -294,14 +460,8 @@ def handle_question() -> None:
         timer.mark("context_done")
 
         print("[Sherpa] Thinking...")
-        answer, turn = session.ask(question, ctx)
-        timer.mark("claude_done")
-        if not _current(token):
-            print("[Sherpa] (Superseded while thinking — answer discarded.)")
-            return
-        print(f"[Sherpa] Answer: {answer}")
-
-        _speak(answer, token, turn, timer)
+        events, turn = session.ask_stream(question, ctx)
+        _speak_events(events, token, turn, timer)  # speaks as the answer streams in
         _guide(token, turn, question)
 
     except Exception:
@@ -533,13 +693,8 @@ def _process_pending(token: int, snapshot: list) -> None:
         debug.new_turn()
         print(f"[Sherpa] Question: {question}")
         print("[Sherpa] Thinking...")
-        answer, turn = session.ask(question, ctx)
-        timer.mark("claude_done")
-        if not _current(token):
-            print("[Sherpa] (Superseded while thinking — a newer message will be answered instead.)")
-            return
-        print(f"[Sherpa] Answer: {answer}")
-        _speak(answer, token, turn, timer)
+        events, turn = session.ask_stream(question, ctx)
+        _speak_events(events, token, turn, timer)  # speaks as the answer streams in
         _guide(token, turn, question)
     except Exception:
         if _current(token):
