@@ -246,7 +246,7 @@ def _wait_for_click(step: Step, found: locate.Located, task: str, clicks, still_
 def run(steps: list, task: str, still_wanted: Callable[[], bool], speak: Callable[[str], None], clicks=None,
         filler: Optional[Callable[[str], None]] = None) -> None:
     """Point through `steps`. `speak(text)` blocks while she talks. `clicks` is
-    injectable for tests."""
+    injectable for tests. filler(kind) speaks a short filler line; kind is "plan" or "recheck"; callers must guard for None."""
     if not steps:
         return
     clicks = clicks or Clicks()
