@@ -1,5 +1,6 @@
 """Microphone recording with silence-based auto-stop, and playback."""
 
+import os
 import subprocess
 import threading
 import time
@@ -145,6 +146,12 @@ def record_until_silence(on_started: Optional[Callable[[], None]] = None) -> tup
 
 
 PLAYBACK_RATE = 24000  # matches tts.PCM_FORMAT
+# With "low" latency at 24 kHz on a 48 kHz device, PortAudio calls the Python
+# callback with ~15 frames, ~1,600 times a second: any stretch where another
+# thread holds the GIL then risks a dropout. 1024-frame blocks (~43 ms) cut
+# that to ~23 calls a second for ~40 ms more latency. SHERPA_PLAYBACK_BLOCK=0
+# restores PortAudio's own choice.
+PLAYBACK_BLOCK = int(os.environ.get("SHERPA_PLAYBACK_BLOCK", "1024") or 0)
 PREBUFFER_S = 0.1  # audio queued before output starts, so tiny network jitter doesn't stutter
 _BYTES_PER_S = PLAYBACK_RATE * 2
 
@@ -268,6 +275,7 @@ class PcmPlayer:
                     channels=1,
                     dtype="int16",
                     latency="low",
+                    blocksize=PLAYBACK_BLOCK,
                     callback=self._callback,
                     finished_callback=self._on_finished,
                 )
