@@ -7,8 +7,9 @@ final frame of each turn's gesture (as base64 in memory). `end()` clears it.
 """
 
 import random
+import time
 
-from . import brain
+from . import activity, brain, screenbuffer
 from .overlay import GestureContext
 
 INTERRUPTED_NOTE = " [The user interrupted here, so they may not have heard the rest.]"
@@ -16,6 +17,7 @@ INTERRUPTED_NOTE = " [The user interrupted here, so they may not have heard the 
 # Only recent turns keep their frame; older ones are text, which is enough for "what about that one".
 FRAMES_KEPT_TURNS = 2
 MAX_HISTORY_TURNS = 12
+ACTIVITY_WINDOW_S = 60.0  # how far back the per-turn "recent activity" block looks
 GREETINGS = ["How can I help?", "What's up?", "What do you need?"]
 
 
@@ -24,18 +26,29 @@ def _image_block(b64: str) -> dict:
 
 
 class Session:
-    def __init__(self):
+    def __init__(self, activity_log=None):
         self.active = False
         self.turns: list[dict] = []
+        self.activity = activity_log if activity_log is not None else activity.log
 
     def start(self) -> str:
         self.active = True
         self.turns = []
+        try:
+            self.activity.start()  # watching begins with the session...
+        except Exception as e:
+            print(f"[Sherpa] Activity awareness unavailable: {type(e).__name__}")
+        try:
+            screenbuffer.buffer.start()  # low-rate, memory-only screen history for the session
+        except Exception as e:
+            print(f"[Sherpa] Screen buffer unavailable: {type(e).__name__}")
         return random.choice(GREETINGS)
 
     def end(self) -> None:
         self.active = False
         self.turns = []
+        self.activity.stop()  # ...and ends with it, purging everything
+        screenbuffer.buffer.stop()  # purges every buffered frame
 
     def ask_stream(self, question: str, ctx: GestureContext) -> tuple:
         """Start asking Claude about this turn. Returns (events, turn): `events`
@@ -53,6 +66,10 @@ class Session:
             last_frame_b64 = brain.encode_pil(img)
             content.append({"type": "text", "text": f"{label}:"})
             content.append(_image_block(last_frame_b64))
+        # This turn only: never stored in history (_history_messages rebuilds from the turn record).
+        recent = self.activity.recent_timeline(ACTIVITY_WINDOW_S)
+        if recent:
+            content.append({"type": "text", "text": f"Recent activity (last ~{ACTIVITY_WINDOW_S:.0f}s), newest last:\n{recent}"})
         content.append({"type": "text", "text": f"Question: {question}"})
 
         events = brain.stream_answer(self._history_messages() + [{"role": "user", "content": content}])
@@ -73,6 +90,7 @@ class Session:
             turn["answer"] += f" [I then pointed them through: {route}]"
 
     def commit(self, turn: dict) -> None:
+        turn.setdefault("t", time.monotonic())  # when it was first heard (corrections look at recency)
         self.turns.append(turn)
         del self.turns[:-MAX_HISTORY_TURNS]
         for old in self.turns[:-FRAMES_KEPT_TURNS]:

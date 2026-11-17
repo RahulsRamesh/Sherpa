@@ -125,6 +125,58 @@ the moment the utterance was recognised as finished). It stays in your
 terminal. Set `SHERPA_TIMING=0` in `.env` to hide it (`SHERPA_DEBUG=1`
 is the separate switch for saving request data).
 
+## Activity awareness
+
+While a session is active, Sherpa also watches what you do, so her advice stays
+current and she can later notice things like "you typed @hotmail.com but said
+you'd use Gmail". Everything below happens locally, with no API calls; only a
+short "recent activity" summary (the last ~60s) rides along with your questions.
+
+- **What it notes:** which app and window you're in, dialogs opening, which
+  field has focus, what you click (the button or control under the pointer),
+  scrolling, and *that* you're typing. When you finish a field (focus leaves,
+  Return/Tab, or a ~1s pause) it reads the field's text, so autofill, paste and
+  backspace are reflected correctly.
+- **What it never does:** record which keys you press (the keyboard listener only
+  sees "typing" or "Return/Tab"), read password fields (it only notes "typed in
+  a password field, content not read"), or send anything unredacted. Long digit
+  runs (card numbers), SSN-like numbers and secret-looking tokens (API keys) are
+  replaced with "[redacted]" and field text is cut to ~200 characters; email
+  addresses and ordinary words are kept.
+- **Nothing is saved:** it is all in memory, starts when the session starts, and
+  is wiped when the session ends. It is never written to disk or logged to the
+  terminal.
+- **Kill-switch:** `SHERPA_ACTIVITY=0` in `.env` turns it off completely.
+- **Try it:** `python -m sherpa.activity` (from a terminal with Accessibility and
+  Input Monitoring permission) prints events live for 60s with field contents
+  masked; add `--show-content` to see what it captured, then prints the
+  timeline Claude would get.
+
+### Corrections
+
+If you tell Sherpa what you want and then type something that contradicts it
+(you said Gmail, you type `rahul@hotmail.com`; you dictated "John Smith" and typed
+"Jon Smyth"; an email field with no `@`), she says so in one friendly sentence.
+
+- **Only when you asked for something:** it needs a stated goal from the last ~10
+  minutes of the session (your questions and her answers, guide steps, or a message
+  still waiting for an answer). With no recent goal nothing is checked.
+- **How:** when you finish a field, one quick text-only Haiku call (no screenshots)
+  compares the typed text with your goal. It is biased hard against false alarms:
+  unrelated fields, plausible values and anything ambiguous stay silent, and she only
+  speaks at confidence 0.8 or more (`SHERPA_CORRECTION_CONFIDENCE`).
+- **Never rude:** she won't speak over herself, while she is working, while you are
+  talking, or while you are still typing (a newer keystroke or a changed field cancels it).
+  At most one correction per 30s and 5 per session; the same field/value is checked once.
+  If she was guiding you through steps, the correction ends the walkthrough (ask her
+  to continue). It is added to the conversation, so you can ask "wait, which one?".
+- **Privacy:** password fields are never read; the typed text (already redacted by
+  activity awareness) is sent to Claude only inside this one check, only when there
+  is a recent goal. The terminal only shows `Correction check: flagged/ok`, and
+  nothing about it goes into the `SHERPA_DEBUG` dump.
+- **Kill-switch:** `SHERPA_CORRECTIONS=0` in `.env`. Needs activity awareness
+  (`SHERPA_ACTIVITY` not 0).
+
 ## Memory and privacy
 
 Within a session, Sherpa keeps a running conversation (your questions, its
@@ -138,11 +190,24 @@ Nothing is written to disk longer than it needs to be:
   voice mode audio is streamed and never saved.
 - Each answer's audio is streamed from ElevenLabs straight to the speakers
   in memory; it is never written to disk.
-- Screen frames are deleted as soon as they've been read into memory to
+- Screen frames are held in memory only; no screenshot is ever written to
+  disk. Captures go straight from the display into memory (no `screencapture`
+  subprocess, no PNG files) and are freed as soon as they've been used to
   build the annotated images (or immediately if you say nothing). In voice
   mode they're kept until the answer starts playing, in case a follow-up
-  gets merged into the same message.
-- Ending a session (triple-tap) clears the in-memory conversation.
+  gets merged into the same message. If the fast in-memory capture ever
+  fails, Sherpa falls back to `screencapture`, which writes one temp file in
+  `sherpa/_tmp/` that is deleted the instant it has been read.
+- While a session is active, Sherpa also keeps a low-rate screen buffer: about
+  one capture per second of the display your pointer is on (backing off to one
+  every 3 seconds when nothing changes, paused while the screen is locked or
+  the screen saver is running). It holds the last ~30 seconds as tiny change-
+  detection thumbnails plus at most 6 full-size frames of moments when the
+  screen changed (~35 MB of RAM in total). It lives only in memory, is never
+  sent anywhere by itself (a frame is only sent to Claude when you ask a
+  question), and is wiped when the session ends. Set `SHERPA_SCREEN_BUFFER=0`
+  to turn it off, or `SHERPA_IDLE_FPS` to change its rate.
+- Ending a session (triple-tap) clears the in-memory conversation and the screen buffer.
 - On every startup, Sherpa also sweeps `sherpa/_tmp/` clean, in case a
   previous run was killed mid-session before it could clean up after
   itself.

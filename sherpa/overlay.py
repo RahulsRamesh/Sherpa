@@ -135,7 +135,7 @@ def build_context(
 ) -> GestureContext:
     """Assemble the annotated frames and timeline for one question.
 
-    By default consumes (deletes) the keyframe image files; pass consume=False
+    By default consumes (frees) the in-memory keyframe images; pass consume=False
     when the same frames may be needed again (e.g. a message that gets merged).
     """
     if not keyframes:
@@ -173,10 +173,11 @@ def build_context(
     ]
 
     for k, kf in enumerate(keyframes):
-        raw = Image.open(kf.path)
-        raw.load()
+        raw = kf.image
+        if raw is None:
+            raise RuntimeError("Screen frame was already consumed.")
         if consume:
-            kf.path.unlink(missing_ok=True)
+            kf.image = None  # drop our reference; `raw` is freed once rendered
 
         seg = [p for p in trace if bounds[k] <= p.t < bounds[k + 1]]
         if k > 0 and trace:  # continue the path from the previous interval's last point
@@ -185,7 +186,7 @@ def build_context(
                 seg.insert(0, TracePoint(bounds[k], prev[-1].x, prev[-1].y))
         marks = [(num, g) for num, g in numbered if owner[num] == k]
         frames.append((f"Frame {k + 1} of {len(keyframes)}", _render_frame(raw, kf.rect, seg, marks)))
-        raw.close()
+        del raw
 
         span = f"{rel(bounds[k]):.1f}s to {rel(min(bounds[k + 1], window_end)):.1f}s"
         head = f"Frame {k + 1} ({span})"

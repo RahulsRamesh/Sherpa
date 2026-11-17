@@ -31,8 +31,7 @@ from typing import Optional
 from PIL import Image
 
 from . import accessibility, brain
-from .capture import grab_display_under_cursor
-from .config import TMP_DIR
+from .capture import grab_under_cursor
 
 MAX_LISTED = 250
 CROP_W, CROP_H = 480, 320  # points around the cursor shown to the refinement check
@@ -77,14 +76,8 @@ class Located:
 # ---------------------------------------------------------------- screenshots
 def _screenshot() -> tuple:
     """(PIL image, display rect in points) of the display the pointer is on."""
-    path = TMP_DIR / f"locate_{time.monotonic_ns()}.png"
-    try:
-        _, rect = grab_display_under_cursor(path)
-        img = Image.open(path)
-        img.load()
-    finally:
-        path.unlink(missing_ok=True)
-    return img, rect
+    shot, ref = grab_under_cursor()  # in memory, never on disk
+    return shot.to_pil(None), ref.rect  # full pixel size: refine() crops at native resolution
 
 
 def _scaled(img: Image.Image) -> Image.Image:

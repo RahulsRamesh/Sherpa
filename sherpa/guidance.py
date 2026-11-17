@@ -32,8 +32,7 @@ from typing import Callable, Optional
 from pynput import mouse
 
 from . import imgdiff, locate
-from .capture import get_cursor_position, grab_display_under_cursor
-from .config import TMP_DIR
+from .capture import get_cursor_position, grab_under_cursor
 from .guide import guide
 
 IDLE_TIMEOUT_S = 60.0  # no click for this long: leave the guide
@@ -114,14 +113,11 @@ def _find(step: Step, task: str) -> Optional[locate.Located]:
 
 def _screen_thumb():
     """Small grayscale thumbnail of the display under the pointer, or None."""
-    path = TMP_DIR / f"guidance_{time.monotonic_ns()}.png"
     try:
-        grab_display_under_cursor(path)
-        return imgdiff.thumbnail_of(path)
+        shot, _ = grab_under_cursor(nominal=True)  # in memory, never on disk
+        return shot.thumbnail()
     except Exception:
         return None
-    finally:
-        path.unlink(missing_ok=True)
 
 
 class _Prefetch:

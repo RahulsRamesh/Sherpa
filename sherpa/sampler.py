@@ -6,22 +6,26 @@ the display under the pointer in the background and keeps a frame only when
 it is the first one, the pointer moved to another display, or the screen
 visibly changed since the last kept frame. At most MAX_KEYFRAMES are kept.
 
-Frames live on disk only until the context is built (or discard() is called).
+Frames are held in memory only (PIL images, longest side <= 1568px); nothing
+is written to disk. They are freed when the context is built (the overlay
+consumes them) or discard() is called.
+
+While a sampler runs it holds the session-wide ScreenBuffer (screenbuffer.py)
+paused, so the two never capture at once, and its first frame reuses the
+buffer's newest capture when that is under 0.4s old.
 """
 
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 from . import capture, imgdiff
-from .config import TMP_DIR
 
 MAX_KEYFRAMES = 6
-SAMPLES_PER_SECOND = 3  # capture start-to-start; a capture takes ~0.3s, so this is about the ceiling
+SAMPLES_PER_SECOND = 3  # capture start-to-start. A capture is ~30ms now, but 3/s is plenty for gestures.
 # Keep a new frame when this fraction of the 64x64 thumbnail cells changed.
 # Just above the ~0.003 noise floor measured on a static screen (blinking
 # cursor, clock), so identical-looking screens are dropped but any real
@@ -31,10 +35,10 @@ CHANGE_FRACTION = 0.005
 
 @dataclass
 class Keyframe:
-    path: Path
+    image: Optional[object]  # PIL RGB image (None once consumed by the overlay)
     t: float  # monotonic time the screen was captured
     display_index: int
-    rect: tuple  # display bounds in global points: (x, y, w, h)
+    rect: tuple  # display bounds in global points: (x, y, w, h); image.width / rect[2] is pixels per point
     thumb: np.ndarray
 
 
@@ -43,10 +47,15 @@ class ScreenSampler:
         self._frames: list = []
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._counter = 0
         self._error: Optional[Exception] = None
+        self._held = False
+        self._hold_lock = threading.Lock()
 
     def start(self) -> None:
+        from .screenbuffer import buffer
+
+        buffer.hold()
+        self._held = True
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -64,30 +73,51 @@ class ScreenSampler:
         return list(self._frames)
 
     def discard(self) -> None:
-        """Delete any frame files still on disk. Safe to call more than once."""
+        """Free any frames still held. Safe to call more than once."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join()
-        for f in self._frames:
-            f.path.unlink(missing_ok=True)
+        self._release()
         self._frames = []
+
+    def _release(self) -> None:
+        with self._hold_lock:
+            if not self._held:
+                return
+            self._held = False
+        from .screenbuffer import buffer
+
+        buffer.release()
 
     def _run(self) -> None:
         try:
+            first = True
             while not self._stop.is_set():
                 next_at = time.monotonic() + 1.0 / SAMPLES_PER_SECOND
-                self._grab()
+                self._grab(allow_seed=first)
+                first = False
                 self._stop.wait(max(0.0, next_at - time.monotonic()))
             self._grab()  # final state of the screen
         except Exception as e:  # surfaced by finish() only if no frame was ever kept
             self._error = e
+        finally:
+            self._release()
 
-    def _grab(self) -> None:
-        self._counter += 1
-        path = TMP_DIR / f"kf_{int(time.time() * 1000)}_{self._counter}.png"
-        t = time.monotonic() + 0.1  # the capture lands shortly after we ask
-        index, rect = capture.grab_display_under_cursor(path)
-        thumb = imgdiff.thumbnail_of(path)
+    def _grab(self, allow_seed: bool = False) -> None:
+        shot, t, index, rect = None, 0.0, 0, (0, 0, 0, 0)
+        if allow_seed:
+            from .screenbuffer import buffer
+
+            seed = buffer.fresh_shot()
+            if seed is not None:
+                shot, s = seed
+                t, index, rect = s.t, s.index, s.rect
+        if shot is None:
+            ref = capture.display_under_cursor()
+            t = time.monotonic()
+            shot = capture.grab_display(ref, nominal=True)
+            index, rect = ref.index, ref.rect
+        thumb = shot.thumbnail()
 
         last = self._frames[-1] if self._frames else None
         keep = (
@@ -96,11 +126,10 @@ class ScreenSampler:
             or imgdiff.changed_fraction(thumb, last.thumb) >= CHANGE_FRACTION
         )
         if not keep:
-            path.unlink(missing_ok=True)
             return
 
-        frame = Keyframe(path, t, index, rect, thumb)
+        frame = Keyframe(shot.to_pil(), t, index, rect, thumb)
         if len(self._frames) >= MAX_KEYFRAMES:
             # Out of slots: the newest state replaces the latest kept frame.
-            self._frames.pop().path.unlink(missing_ok=True)
+            self._frames.pop()
         self._frames.append(frame)

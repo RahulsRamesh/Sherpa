@@ -25,6 +25,13 @@ that had begun playing, plus INTERRUPTED_NOTE (session.note_interrupted); the
 rest is dropped. The guide-steps suffix is added only once everything was
 spoken. Superseding stops the player, the fetch threads and the Claude stream.
 
+Corrections. corrections.py may speak ONE sentence on its own when what the
+user typed contradicts what they asked for (deliver_correction). It takes a
+token like any new work, but only when the phase is idle or guiding, nothing is
+pending and no voice capture is in progress (checked atomically with taking the
+token). A running guide is superseded by it. It is committed as a synthetic
+turn (turn["synthetic"], empty frame) when it starts playing.
+
 Voice mode. A toggle turns on continuous listening (voice.py). Each finished
 utterance goes through the same pending/merge path. Talking over Sherpa stops
 her (barge-in), with a guard that ignores her own voice coming back through
@@ -39,7 +46,7 @@ import traceback
 from collections import deque
 from typing import Optional
 
-from . import audio, debug, guidance, overlay, speechtext, stt, tts
+from . import audio, corrections, debug, guidance, overlay, speechtext, stt, tts
 from .timing import TurnTimer
 from .config import VOICE_BARGE_IN
 from .pointer import PointerTracker
@@ -356,6 +363,41 @@ def _guide(token: int, turn: dict, task: str) -> None:
     guidance.run(steps, task, still_wanted=lambda: _current(token), speak=speak)
 
 
+def _can_correct() -> bool:
+    """Is now a polite moment for a correction? Idle or guiding only, and the
+    user isn't talking (voice-mode capture) or waiting on an answer."""
+    return _phase in ("idle", "guiding") and not _pending and _capture is None
+
+
+def deliver_correction(say: str, question: str) -> bool:
+    """Speak ONE correction sentence (see corrections.py). Takes a fresh token
+    only if the moment is right, checked atomically with taking it; a running
+    guide is superseded (the correction ends it). The sentence is committed as a
+    synthetic turn when it starts playing, so follow-ups know about it."""
+    global _token, _phase
+    with _state_lock:
+        if not _can_correct():
+            return False
+        was_guiding = _phase == "guiding"
+        _token += 1
+        _phase = "working"
+        token = _token
+    turn = {"question": question, "frame_b64": "", "answer": "", "steps": [], "synthetic": True}
+    try:
+        _speak_events(iter([("text", say)]), token, turn)
+        if was_guiding and turn["answer"]:
+            turn["answer"] += " [This interrupted the step-by-step walkthrough, which stopped.]"
+    except Exception as e:
+        print(f"[Sherpa] Couldn't speak the correction: {type(e).__name__}")
+        return False
+    finally:
+        _release(token)
+    return True
+
+
+corrections.bind(lambda: session.turns, lambda: [u.text for u in _pending], _can_correct, deliver_correction)
+
+
 def _is_echo(text: str) -> bool:
     """True if `text` is mostly what Sherpa is saying (or just said): her own
     voice picked up by the mic."""
@@ -374,6 +416,7 @@ def handle_start() -> None:
     token, _ = _supersede("working")
     try:
         greeting = session.start()
+        corrections.start()
         print(f"\n[Sherpa] Session started. {greeting}")
         _speak(greeting, token)
     finally:
@@ -388,6 +431,7 @@ def handle_end() -> None:
     trail.stop()
     with _state_lock:
         _discard_pending_locked()
+    corrections.stop()
     session.end()
     print("[Sherpa] Session ended — data purged.")
     audio.play_cue("session_end")
@@ -497,6 +541,7 @@ def toggle_voice() -> None:
         return
     if not session.active:
         session.start()
+        corrections.start()
         print("\n[Sherpa] Session started (voice mode).")
     stream = VoiceStream(_on_speech_started, _on_interim, _on_utterance)
     try:
